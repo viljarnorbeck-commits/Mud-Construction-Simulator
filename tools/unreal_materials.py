@@ -102,6 +102,9 @@ class Graph:
         if not ASSETS.save_loaded_asset(self.material, only_if_is_dirty=False):
             raise RuntimeError(f"Could not save {self.name}")
 
+    def enable_instances(self):
+        EDIT.set_material_usage(self.material, unreal.MaterialUsage.MATUSAGE_INSTANCED_STATIC_MESHES)
+
 
 def blend(graph, left, right, factor):
     return tuple(graph.lerp(a, b, factor) for a, b in zip(left, right))
@@ -112,13 +115,15 @@ def make_ground(asset_tools, surfaces):
     vertex = g.node("VertexColor")[0]
     grass, aggregate, variation, wetness = ((vertex, name) for name in ("R", "G", "B", "A"))
     # UVs are world metres. Keep the photographed texture scale close to the original surfaces.
-    soil = g.surface(surfaces["Soil"], g.uv(0.69))
+    soil, soil_normal, soil_roughness = g.surface(surfaces["Soil"], g.uv(0.69))
+    soil = (g.multiply(soil, g.color((0.76, 0.67, 0.54))), soil_normal, soil_roughness)
     mud = g.surface(surfaces["Mud"], g.uv(0.55))
-    turf = g.surface(surfaces["Grass"], g.uv(0.47))
+    turf, turf_normal, turf_roughness = g.surface(surfaces["Grass"], g.uv(0.47))
+    turf = (g.multiply(turf, g.color((0.55, 0.86, 0.48))), turf_normal, turf_roughness)
     gravel = g.surface(surfaces["Gravel"], g.uv(0.82))
     bare = blend(g, soil, mud, wetness)
     color, normal, roughness = blend(g, blend(g, bare, turf, grass), gravel, aggregate)
-    patch_tone = g.lerp(g.scalar(0.69), g.scalar(1.28), variation)
+    patch_tone = g.lerp(g.scalar(0.61), g.scalar(1.17), variation)
     g.bind(g.multiply(color, patch_tone), PROPERTY.MP_BASE_COLOR)
     g.bind(normal, PROPERTY.MP_NORMAL)
     # The wet scan supplies the darker color. Water also lowers the surface roughness.
@@ -129,6 +134,8 @@ def make_ground(asset_tools, surfaces):
 
 def make_cargo(asset_tools, name, maps, tint, scale):
     g = Graph(asset_tools, name)
+    if name == "Loose":
+        g.enable_instances()
     color, relief, roughness = g.surface(maps, g.uv(scale))
     g.bind(g.multiply(color, g.color(tint)), PROPERTY.MP_BASE_COLOR)
     g.bind(relief, PROPERTY.MP_NORMAL)
@@ -184,31 +191,60 @@ def make_water(asset_tools):
     g.finish()
 
 
-def make_palette(asset_tools):
+def make_palette(asset_tools, mud_maps):
     palette = {
-        "Pine": ((0.035, 0.102, 0.066), 0.89, 0),
+        "Pine": ((0.025, 0.104, 0.044), 0.89, 0),
         "Bark": ((0.094, 0.048, 0.029), 0.91, 0),
-        "Ochre": ((0.57, 0.30, 0.047), 0.56, 0.16),
-        "Amber": ((0.71, 0.41, 0.063), 0.55, 0.14),
-        "Teal": ((0.066, 0.28, 0.23), 0.53, 0.16),
+        "Ochre": ((0.31, 0.141, 0.027), 0.49, 0.0),
+        "Amber": ((0.40, 0.191, 0.032), 0.47, 0.0),
+        "Teal": ((0.055, 0.24, 0.19), 0.43, 0.0),
         "Rubber": ((0.028, 0.030, 0.030), 0.90, 0),
-        "Steel": ((0.15, 0.16, 0.16), 0.58, 0.38),
-        "Glass": ((0.043, 0.080, 0.092), 0.22, 0.35),
+        "Tyre": ((0.028, 0.030, 0.030), 0.89, 0.0),
+        "Chassis": ((0.044, 0.048, 0.047), 0.64, 0.22),
+        "Steel": ((0.22, 0.23, 0.24), 0.51, 0.77),
+        "WornSteel": ((0.18, 0.17, 0.15), 0.57, 0.68),
+        "CuttingEdge": ((0.35, 0.36, 0.37), 0.39, 0.88),
+        "CylinderRod": ((0.52, 0.56, 0.60), 0.20, 0.96),
+        "Glass": ((0.018, 0.037, 0.045), 0.19, 0.0),
         "GoldMarker": ((0.76, 0.48, 0.026), 0.55, 0),
         "RedMarker": ((0.80, 0.11, 0.04), 0.55, 0),
         "Headlight": ((0.86, 0.80, 0.64), 0.31, 0.2),
+        "AmberLamp": ((0.79, 0.26, 0.019), 0.26, 0.0),
+        "RedLamp": ((0.43, 0.021, 0.012), 0.27, 0.0),
+    }
+    dirt = {
+        "Ochre": (0.12, 0.30), "Amber": (0.10, 0.23), "Teal": (0.13, 0.29),
+        "Chassis": (0.09, 0.31), "Tyre": (0.10, 0.42), "WornSteel": (0.19, 0.51),
     }
     for name, (color, roughness, metallic) in palette.items():
         g = Graph(asset_tools, name)
+        if name in ("Pine", "Bark", "Rubber", "Tyre", "Steel", "WornSteel"):
+            g.enable_instances()
         base = g.color(color)
+        rough = g.scalar(roughness)
+        metal = g.scalar(metallic)
         if name == "Pine":
             shade = g.lerp(g.scalar(0.72), g.scalar(1.37), g.node("PerInstanceRandom"))
             base = g.multiply(base, shade)
+        if name in dirt:
+            low, high = dirt[name]
+            mud, normal, mask = g.surface(mud_maps, g.uv(1.65))
+            amount = g.lerp(g.scalar(low), g.scalar(high), mask)
+            base = g.lerp(base, g.multiply(mud, g.color((0.68, 0.56, 0.43))), amount)
+            rough = g.lerp(rough, g.scalar(0.83), amount)
+            metal = g.lerp(metal, g.scalar(0), amount)
+            if name in ("Tyre", "WornSteel"):
+                g.bind(g.lerp(g.color((0, 0, 1)), normal, g.scalar(0.30)), PROPERTY.MP_NORMAL)
+        if name == "Glass":
+            edge = g.node("Fresnel")
+            base = g.lerp(base, g.color((0.095, 0.16, 0.19)), edge)
+            g.bind(g.scalar(0.62), PROPERTY.MP_SPECULAR)
         g.bind(base, PROPERTY.MP_BASE_COLOR)
-        g.bind(g.scalar(roughness), PROPERTY.MP_ROUGHNESS)
-        g.bind(g.scalar(metallic), PROPERTY.MP_METALLIC)
-        if name in ("GoldMarker", "RedMarker", "Headlight"):
-            g.bind(g.multiply(base, g.scalar(0.38)), PROPERTY.MP_EMISSIVE_COLOR)
+        g.bind(rough, PROPERTY.MP_ROUGHNESS)
+        g.bind(metal, PROPERTY.MP_METALLIC)
+        if name in ("GoldMarker", "RedMarker", "Headlight", "AmberLamp", "RedLamp"):
+            glow = 0.20 if name in ("AmberLamp", "RedLamp") else 0.38
+            g.bind(g.multiply(base, g.scalar(glow)), PROPERTY.MP_EMISSIVE_COLOR)
         g.finish()
 
 
@@ -220,8 +256,8 @@ def build_materials(asset_tools):
         for name in ("Soil", "Mud", "Grass", "Gravel")
     }
     make_ground(asset_tools, surfaces)
-    make_cargo(asset_tools, "Loose", surfaces["Soil"], (1.08, 0.92, 0.82), 2.8)
+    make_cargo(asset_tools, "Loose", surfaces["Soil"], (0.84, 0.70, 0.54), 2.8)
     make_cargo(asset_tools, "LooseGravel", surfaces["Gravel"], (1.11, 1.05, 0.95), 2.4)
     make_cargo(asset_tools, "LooseRock", surfaces["Gravel"], (0.68, 0.77, 0.81), 1.3)
     make_water(asset_tools)
-    make_palette(asset_tools)
+    make_palette(asset_tools, surfaces["Mud"])

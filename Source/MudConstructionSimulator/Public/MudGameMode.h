@@ -34,6 +34,7 @@ public:
     FString MissionText() const;
     FString SurveyText() const;
     FString StatusText() const;
+    bool IsCabView() const { return bCab; }
     float FrameSeconds = 0;
     bool bShowMap = false;
     bool bShowHelp = true;
@@ -43,17 +44,20 @@ private:
     UPROPERTY() TObjectPtr<AMudTerrain> Terrain;
     UPROPERTY() TArray<AMudMachine*> Fleet;
     FVector2D OnFoot;
-    int32 Active = 0;
-    double LookYaw = -35;
-    double LookPitch = -21;
+    int32 Active = 1;
+    double LookYaw = -55;
+    double LookPitch = -27;
+    double CabYaw = 0;
+    double CabPitch = -15;
     double Distance = 12;
-    double StepBank = 0;
     double Throttle = 0;
     double Steering = 0;
     double HydraulicA = 0;
     double HydraulicB = 0;
     double MouseHydraulicA = 0;
     double MouseHydraulicB = 0;
+    double PadHydraulicA = 0;
+    double PadHydraulicB = 0;
     bool bMouseHydraulics = false;
     bool bPadHydraulics = false;
     bool bCab = false;
@@ -70,7 +74,7 @@ private:
     double BenchmarkLast = 0;
     TArray<double> BenchmarkFrames;
 
-    void Step(double Dt);
+    void Step(double Dt, const FVector2D& Hydraulics);
     void UpdateCamera();
     void UpdateBenchmark();
     void SetThrottle(float Value) { Throttle = FMath::Clamp(Value, -1.f, 1.f); }
@@ -81,10 +85,11 @@ private:
     void MoveMouseY(float Value);
     void MovePadX(float Value);
     void MovePadY(float Value);
+    void PanView(double Yaw, double Pitch);
     void Zoom(float Value);
     void EnterExit();
     void SwapVehicle();
-    void SwitchCamera() { bCab = !bCab; }
+    void SwitchCamera();
     void SwitchMap() { bShowMap = !bShowMap; }
     void SwitchHelp() { bShowHelp = !bShowHelp; }
     void MouseHydraulicsOn() { bMouseHydraulics = true; }

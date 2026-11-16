@@ -46,7 +46,7 @@ public:
     void Deposit(FVector2D XY, double Radius, const Earthwork::Load& Load);
     void ShowSpill(FVector Origin, double Volume);
     void UpdateSpills(double Dt);
-    void Grade(FVector2D XY, double Radius, double Rate);
+    double Grade(FVector2D XY, double Radius, double Rate);
     void UpdateTiles(FVector2D Focus);
     bool HitsTree(FVector2D XY, double Radius, bool bClear);
     double Remaining(const FMudPile& Pile) const;

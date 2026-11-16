@@ -42,9 +42,9 @@ Skriptet kontrollerar filens hash, Windows-signaturen och det förväntade certi
 
 ## Spela
 
-1. Tryck **9** för kartan. De ljusblå markeringarna visar de två vadställena och det stora kartläget visar uppskattad fyllnadsvolym.
-2. Kör dumpern till en grusdepå och stanna vid högen. **R** lastar från depån. För manuell lastning, ställ dumperns flak inom räckhåll för grävaren. Sänk skopan i materialet, aktivera grävning med **V**, lyft och sväng över flaket. Tryck **I** för att tömma skopan.
-3. Backa dumpern mot vadet och tippa med **I**. Kör sakta medan du tippar för att lägga ut material över flera meter. Kör bulldozern över gruset med bladet nere och utjämning vald för att jämna ut körbanan. Ett sänkt blad röjer också träd.
+1. Ett nytt spel börjar i grävaren. Stå still och tryck **V** för att sänka skopan, ta ett grävtag och lyfta lasset. Den gröna markören visar var material flyttas. Tryck **I** för att tippa där skopan är. **Tab** byter fordon.
+2. För att lasta dumpern med grävaren, parkera flaket inom räckhåll och sväng den lyfta skopan över flaket innan du trycker **I**. Med **J/K/N/M** tar du över hydrauliken. **G** växlar mellan bom/sticka och skopa/sväng. Vid en materialdepå kan **R** lasta dumpern direkt.
+3. Öppna kartan med **9** och välj ett av de ljusblå vadställena. Backa dit med dumpern och tippa med **I**. Sänk bulldozerns blad med **V** och kör framåt för att schakta. **I** sprider jorden som bladet har samlat upp och höjer bladet när lasset är slut. Växla till utjämning med **G**, sänk bladet igen och kör över fyllningen. Ett sänkt blad röjer också träd.
 4. Lasta terränglastbilen och passera den gula startportalen. Kör till den röda målportalen med minst 18 m³ kvar på flaket.
 
 | Funktion | Tangentbord och mus | Xbox |
@@ -60,6 +60,8 @@ Skriptet kontrollerar filens hash, Windows-signaturen och det förväntade certi
 | Spara och läs in | F5, F9 | |
 
 Bulldozerns **G** växlar mellan schaktning och utjämning. På grävaren växlar knappen mellan bom/sticka och skopa/sväng. Kontrollerna kan redigeras i `Config/DefaultInput.ini` före ompaketering.
+
+Med **C** växlar du mellan hytten och kameran utanför maskinen. Instrumentet i hytten visar fart, färdriktning och last. På grävaren och bulldozern visar arbetsinstrumentet skärets höjd mot marken. Ett negativt värde betyder att skäret ligger under markytan.
 
 ## Testa 4K och 120 fps
 

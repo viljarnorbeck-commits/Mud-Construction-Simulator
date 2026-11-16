@@ -291,15 +291,26 @@ Earthwork::Load AMudTerrain::Excavate(FVector2D XY, double Radius, double Amount
     const auto Area = Cells(XY, Radius);
     if (Area.IsEmpty() || Amount <= 0)
         return Result;
-    const double Portion = Amount / Area.Num();
+    const auto Weight = [&](int32 Cell)
+    {
+        const double Distance = FVector2D::Distance(XY, FVector2D(Cell % Samples, Cell / Samples));
+        return 0.20 + 0.80 * (1.0 - Distance / Radius);
+    };
+    double TotalWeight = 0;
+    for (int32 Cell : Area)
+        if (Heights[Cell] > ToolHeight + Epsilon)
+            TotalWeight += Weight(Cell);
+    if (TotalWeight <= Epsilon)
+        return Result;
     for (const int32 Cell : Area)
     {
-        const double Cut = FMath::Min(Portion, Heights[Cell] - ToolHeight);
+        const double Cut = FMath::Min(Amount * Weight(Cell) / TotalWeight, Heights[Cell] - ToolHeight);
         if (Cut <= Epsilon)
             continue;
         const Load Removed = Edit(Cell).Cut(Cut);
         Result.Receive(Removed);
-        UpdateCell(Cell);
+        if (Removed.Volume() > Epsilon)
+            UpdateCell(Cell);
     }
     return Result;
 }
@@ -352,7 +363,7 @@ void AMudTerrain::Deposit(FVector2D XY, double Radius, const Earthwork::Load& Lo
 
 void AMudTerrain::ShowSpill(FVector Origin, double Volume)
 {
-    SpillCredit += Volume * 6;
+    SpillCredit += Volume * 12;
     const int32 Count = FMath::Min(FMath::FloorToInt(SpillCredit), 12);
     SpillCredit -= Count;
     for (int32 I = 0; I < Count; ++I)
@@ -389,41 +400,45 @@ void AMudTerrain::UpdateSpills(double Dt)
         Spoil->BatchUpdateInstancesTransforms(0, SpillTransforms, false, true, true);
 }
 
-void AMudTerrain::Grade(FVector2D XY, double Radius, double Rate)
+double AMudTerrain::Grade(FVector2D XY, double Radius, double Rate)
 {
     const auto Area = Cells(XY, Radius);
     if (Area.Num() < 2)
-        return;
+        return 0;
     double Average = 0;
     for (int32 Cell : Area)
         Average += Heights[Cell];
     Average /= Area.Num();
     Load Moved;
     double Deficit = 0;
+    TArray<TPair<int32, double>> LowCells;
     for (int32 Cell : Area)
     {
         const double Excess = Heights[Cell] - Average;
         if (Excess > Epsilon)
         {
-            Moved.Receive(Edit(Cell).Cut(Excess * Rate));
-            UpdateCell(Cell);
+            const Load Cut = Edit(Cell).Cut(Excess * FMath::Clamp(Rate, 0.0, 1.0));
+            Moved.Receive(Cut);
+            if (Cut.Volume() > 0)
+                UpdateCell(Cell);
         }
-        else
+        else if (Excess < 0.0)
+        {
             Deficit -= Excess;
+            LowCells.Emplace(Cell, -Excess);
+        }
     }
-    if (Deficit <= Epsilon)
-        return;
-    for (int32 Cell : Area)
+    if (Deficit <= 0 || Moved.Volume() <= 0)
+        return 0;
+    for (const auto& Entry : LowCells)
     {
-        const double Distance = Average - Heights[Cell];
-        if (Distance <= Epsilon)
-            continue;
         Load Share;
         for (size_t M = 0; M < MaterialCount; ++M)
-            Share.Volumes[M] = Moved.Volumes[M] * Distance / Deficit;
-        Edit(Cell).Fill(Share);
-        UpdateCell(Cell);
+            Share.Volumes[M] = Moved.Volumes[M] * Entry.Value / Deficit;
+        Edit(Entry.Key).Fill(Share);
+        UpdateCell(Entry.Key);
     }
+    return Moved.Volume();
 }
 
 double AMudTerrain::Remaining(const FMudPile& Pile) const
@@ -497,7 +512,8 @@ void AMudTerrain::BuildTile(int32 Id, int32 Step)
             const FVector Up = Normal(XY);
             Normals.Add(Up);
             UV.Add(XY);
-            Colors.Add(GroundMasks(Kind, Wetness(XY), Up.Z, XY, bGrass));
+            const double Exposed = FMath::Clamp((Original[Cell] - Z) * 0.95, 0.0, 0.52);
+            Colors.Add(GroundMasks(Kind, FMath::Max(Wetness(XY), Exposed), Up.Z, XY, bGrass));
             Tangents.Emplace(FVector::CrossProduct(FVector::RightVector, Up).GetSafeNormal(), false);
             if (X == 0 || Y == 0)
                 continue;
@@ -622,8 +638,17 @@ void AMudTerrain::BuildMarkers()
             Part->RegisterComponent();
         };
         for (double Side : {-1.0, 1.0})
-            Add(FVector(0, Side * 410, 245), FVector(0.24, 0.24, 4.9));
-        Add(FVector(0, 0, 500), FVector(0.26, 8.45, 0.27));
+        {
+            if (bStart)
+            {
+                Add(FVector(0, Side * 410, 55), FVector(0.22, 0.22, 1.1));
+                Add(FVector(0, Side * 410, 115), FVector(0.12, 0.44, 0.16));
+            }
+            else
+                Add(FVector(0, Side * 410, 245), FVector(0.24, 0.24, 4.9));
+        }
+        if (!bStart)
+            Add(FVector(0, 0, 500), FVector(0.26, 8.45, 0.27));
     }
 }
 
