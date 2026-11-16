@@ -1,0 +1,12 @@
+/Binaries/
+/Build/
+/DerivedDataCache/
+/Intermediate/
+/Saved/
+/Content/Generated/
+/Content/World/
+/Dist/
+/.vs/
+*.sln
+*.VC.db
+__pycache__/
