@@ -5,15 +5,31 @@
 
 namespace MachineMotion
 {
+constexpr double MaxBucketTilt = 36.0;
+
 struct HydraulicInput
 {
     double Boom = 0;
     double Stick = 0;
     double Curl = 0;
     double Swing = 0;
+    double Tilt = 0;
 };
 
 enum class MouseTool { Excavator, Blade, Loader };
+
+constexpr double MouseLookDegreesPerCount = 0.090;
+
+inline double MouseDragSensitivity(MouseTool Tool)
+{
+    return Tool == MouseTool::Excavator ? 0.075 : 0.057;
+}
+
+inline double MouseValveScale(double FrameSeconds)
+{
+    // Convert accumulated mouse counts to a valve command based on their rate at 60 Hz.
+    return 1.0 / (60.0 * FrameSeconds);
+}
 
 // Unreal sends positive Y for upward mouse motion.
 inline void AccumulateMouseDrag(HydraulicInput& Input, bool Left, bool Right, MouseTool Tool, double X, double Y)
@@ -25,20 +41,46 @@ inline void AccumulateMouseDrag(HydraulicInput& Input, bool Left, bool Right, Mo
         Input.Boom += Y;
         return;
     }
-    if (Left)
-        Input.Boom += Y;
     if (Tool == MouseTool::Loader)
     {
-        if (Right)
+        if (Left)
+        {
+            Input.Boom += Y;
+            Input.Curl -= X;
+        }
+        else if (Right)
             Input.Curl += Y;
         return;
     }
-    if (Right)
-        Input.Swing += X;
-    if (Left && !Right)
-        Input.Stick += X;
-    if (Right && !Left)
+    if (Left && Right)
+    {
+        Input.Tilt += X;
         Input.Curl += Y;
+    }
+    else if (Left)
+    {
+        Input.Boom += Y;
+        Input.Swing += X;
+    }
+    else
+    {
+        Input.Stick += Y;
+        Input.Curl += X;
+    }
+}
+
+inline void AddExcavatorKeys(HydraulicInput& Input, bool Shift, double Across, double Vertical)
+{
+    if (Shift)
+    {
+        Input.Stick += Vertical;
+        Input.Curl += Across;
+    }
+    else
+    {
+        Input.Boom += Vertical;
+        Input.Swing += Across;
+    }
 }
 
 inline double Approach(double Current, double Target, double MaxRate, double Dt, double Response)

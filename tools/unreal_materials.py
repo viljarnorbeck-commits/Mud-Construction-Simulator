@@ -36,12 +36,12 @@ def import_texture(asset_tools, file, normal=False):
 
 
 class Graph:
-    def __init__(self, asset_tools, name):
+    def __init__(self, asset_tools, name, folder=FOLDER):
         self.name = name
-        path = f"{FOLDER}/{name}"
+        path = f"{folder}/{name}"
         self.material = ASSETS.load_asset(path) if ASSETS.does_asset_exist(path) else None
         if self.material is None:
-            self.material = asset_tools.create_asset(name, FOLDER, unreal.Material, unreal.MaterialFactoryNew())
+            self.material = asset_tools.create_asset(name, folder, unreal.Material, unreal.MaterialFactoryNew())
         if self.material is None:
             raise RuntimeError(f"Could not create {name}")
         # Unreal removes nodes while iterating the expression list and can skip some.
@@ -123,11 +123,14 @@ def make_ground(asset_tools, surfaces):
     grass, aggregate, variation, wetness = ((vertex, name) for name in ("R", "G", "B", "A"))
     # UVs are world metres. Keep the photographed texture scale close to the original surfaces.
     soil, soil_normal, soil_roughness = g.surface(surfaces["Soil"], g.uv(0.69))
-    soil = (g.multiply(soil, g.color((0.76, 0.67, 0.54))), soil_normal, soil_roughness)
+    soil = (g.multiply(soil, g.color((0.88, 0.77, 0.64))), soil_normal, soil_roughness)
     mud = g.surface(surfaces["Mud"], g.uv(0.55))
     turf, turf_normal, turf_roughness = g.surface(surfaces["Grass"], g.uv(0.47))
-    turf = (g.multiply(turf, g.color((0.55, 0.86, 0.48))), turf_normal, turf_roughness)
-    gravel = g.surface(surfaces["Gravel"], g.uv(0.82))
+    meadow_tint = g.lerp(g.color((0.50, 0.66, 0.48)), g.color((0.84, 0.92, 0.60)), variation)
+    turf = (g.multiply(turf, meadow_tint), turf_normal, turf_roughness)
+    stone, stone_normal, stone_roughness = g.surface(surfaces["Gravel"], g.uv(0.82))
+    gravel_tint = g.lerp(g.color((0.75, 0.80, 0.83)), g.color((1.08, 1.04, 0.95)), variation)
+    gravel = (g.multiply(stone, gravel_tint), stone_normal, stone_roughness)
     bare = blend(g, soil, mud, wetness)
     color, normal, roughness = blend(g, blend(g, bare, turf, grass), gravel, aggregate)
     work = g.node("TextureCoordinate", coordinate_index=1)
@@ -135,9 +138,9 @@ def make_ground(asset_tools, surfaces):
     fill = g.node("ComponentMask", r=False, g=True, b=False, a=False)
     g.connect(work, cut, "")
     g.connect(work, fill, "")
-    color = g.lerp(color, g.multiply(color, g.color((0.80, 0.67, 0.54))), cut)
-    color = g.lerp(color, g.multiply(color, g.color((1.18, 1.065, 0.89))), fill)
-    patch_tone = g.lerp(g.scalar(0.61), g.scalar(1.17), variation)
+    color = g.lerp(color, g.multiply(color, g.color((0.83, 0.66, 0.52))), cut)
+    color = g.lerp(color, g.multiply(color, g.color((1.14, 1.065, 0.94))), fill)
+    patch_tone = g.lerp(g.scalar(0.72), g.scalar(1.15), variation)
     g.bind(g.multiply(color, patch_tone), PROPERTY.MP_BASE_COLOR)
     g.bind(normal, PROPERTY.MP_NORMAL)
     # The wet scan supplies the darker color. Water also lowers the surface roughness.
@@ -197,20 +200,21 @@ def make_water(asset_tools):
     g = Graph(asset_tools, "River")
     g.material.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_SINGLE_LAYER_WATER)
     water = g.node("SingleLayerWaterMaterialOutput")
-    g.connect(g.color((0.0007, 0.0011, 0.0010)), water, "ScatteringCoefficients")
-    g.connect(g.color((0.0080, 0.0046, 0.0034)), water, "AbsorptionCoefficients")
+    g.connect(g.color((0.00085, 0.00145, 0.00150)), water, "ScatteringCoefficients")
+    g.connect(g.color((0.0070, 0.0040, 0.0030)), water, "AbsorptionCoefficients")
     g.connect(g.scalar(0.08), water, "PhaseG")
-    g.connect(g.color((0.90, 0.93, 0.91)), water, "ColorScaleBehindWater")
+    g.connect(g.color((0.96, 0.97, 0.94)), water, "ColorScaleBehindWater")
     broad = g.node("Panner", speed_x=0.012, speed_y=-0.052)
     fine = g.node("Panner", speed_x=-0.027, speed_y=-0.102)
     g.connect(g.uv(0.67, 0.35), broad, "Coordinate")
     g.connect(g.uv(1.30, 0.89), fine, "Coordinate")
     waves_a = g.sample(waves, broad, normal=True)
     waves_b = g.sample(waves, fine, normal=True)
-    g.bind(g.lerp(waves_a, waves_b, g.scalar(0.33)), PROPERTY.MP_NORMAL)
-    g.bind(g.color((0.025, 0.042, 0.043)), PROPERTY.MP_BASE_COLOR)
-    g.bind(g.scalar(0.26), PROPERTY.MP_ROUGHNESS)
-    g.bind(g.scalar(0.16), PROPERTY.MP_OPACITY)
+    ripples = g.lerp(waves_a, waves_b, g.scalar(0.33))
+    g.bind(g.lerp(g.color((0, 0, 1)), ripples, g.scalar(0.82)), PROPERTY.MP_NORMAL)
+    g.bind(g.color((0.031, 0.052, 0.055)), PROPERTY.MP_BASE_COLOR)
+    g.bind(g.scalar(0.30), PROPERTY.MP_ROUGHNESS)
+    g.bind(g.scalar(0.13), PROPERTY.MP_OPACITY)
     g.finish()
 
 
@@ -242,17 +246,26 @@ def make_palette(asset_tools, mud_maps):
     }
     for name, (color, roughness, metallic) in palette.items():
         g = Graph(asset_tools, name)
-        if name in ("Pine", "Bark", "Meadow", "Ochre", "Teal", "Rubber", "Tyre", "Steel", "WornSteel", "CuttingEdge"):
+        if name in ("Pine", "Bark", "Meadow", "Ochre", "Teal", "Rubber", "Tyre", "Chassis",
+                    "Steel", "WornSteel", "CuttingEdge", "AmberLamp"):
             g.enable_instances()
         base = g.color(color)
         rough = g.scalar(roughness)
         metal = g.scalar(metallic)
         if name == "Pine":
-            base = g.lerp(g.multiply(base, g.scalar(0.52)), g.color((0.084, 0.123, 0.045)),
+            base = g.lerp(g.multiply(base, g.scalar(0.68)), g.color((0.074, 0.134, 0.056)),
                           g.node("PerInstanceRandom"))
         if name == "Meadow":
             g.material.set_editor_property("two_sided", True)
-            base = g.lerp(base, g.color((0.24, 0.215, 0.071)), g.node("PerInstanceRandom"))
+            g.material.set_editor_property("blend_mode", unreal.BlendMode.BLEND_MASKED)
+            base = g.lerp(base, g.color((0.25, 0.25, 0.087)), g.node("PerInstanceRandom"))
+            fade = g.node("MaterialFunctionCall")
+            fade_function = ASSETS.load_asset("/Engine/Functions/Engine_MaterialFunctions02/Utility/DitherTemporalAA")
+            fade[0].set_material_function(fade_function)
+            alpha = next(pin for pin in EDIT.get_material_expression_input_names(fade[0])
+                         if str(pin).replace(" ", "").lower().startswith("alphathreshold"))
+            g.connect(g.node("PerInstanceFadeAmount"), fade, alpha)
+            g.bind(fade, PROPERTY.MP_OPACITY_MASK)
         if name in dirt:
             low, high = dirt[name]
             mud, normal, mask = g.surface(mud_maps, g.uv(1.65))
@@ -275,6 +288,53 @@ def make_palette(asset_tools, mud_maps):
         g.finish()
 
 
+def make_cab_glazing(asset_tools):
+    g = Graph(asset_tools, "CabGlazing")
+    g.material.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+    g.material.set_editor_property("two_sided", True)
+    g.material.set_editor_property("translucency_lighting_mode", unreal.TranslucencyLightingMode.TLM_SURFACE)
+    edge = g.node("Fresnel")
+    tint = g.lerp(g.color((0.053, 0.090, 0.098)), g.color((0.27, 0.38, 0.41)), edge)
+    g.bind(tint, PROPERTY.MP_BASE_COLOR)
+    g.bind(g.lerp(g.scalar(0.19), g.scalar(0.62), edge), PROPERTY.MP_OPACITY)
+    g.bind(g.scalar(0.19), PROPERTY.MP_ROUGHNESS)
+    g.bind(g.scalar(0.72), PROPERTY.MP_SPECULAR)
+    g.bind(g.multiply(tint, g.lerp(g.scalar(0.02), g.scalar(0.11), edge)), PROPERTY.MP_EMISSIVE_COLOR)
+    g.finish()
+
+
+def make_cab_interiors(asset_tools):
+    finishes = {
+        "CabTrim": ((0.073, 0.079, 0.083), 0.71),
+        "CabFloor": ((0.027, 0.030, 0.033), 0.88),
+        "CabLiner": ((0.24, 0.23, 0.20), 0.95),
+        "CabCloth": ((0.071, 0.082, 0.093), 0.94),
+        "CabLCD": ((0.018, 0.035, 0.053), 0.31),
+    }
+    for name, (color, roughness) in finishes.items():
+        g = Graph(asset_tools, name)
+        base = g.color(color)
+        if name == "CabFloor":
+            g.enable_instances()
+        if name == "CabCloth":
+            # A small two-directional weave keeps the cushions matte at cabin distances.
+            uv = g.uv(170)
+            threads = []
+            for horizontal in (False, True):
+                channel = g.node("ComponentMask", r=horizontal, g=not horizontal, b=False, a=False)
+                g.connect(uv, channel, "")
+                wave = g.node("Sine")
+                g.connect(channel, wave, "")
+                threads.append(wave)
+            weave = g.multiply(threads[0], threads[1])
+            base = g.lerp(base, g.multiply(base, g.scalar(1.08)), weave)
+        if name == "CabLCD":
+            g.bind(g.multiply(base, g.scalar(0.42)), PROPERTY.MP_EMISSIVE_COLOR)
+        g.bind(base, PROPERTY.MP_BASE_COLOR)
+        g.bind(g.scalar(roughness), PROPERTY.MP_ROUGHNESS)
+        g.finish()
+
+
 def build_materials(asset_tools):
     folder = Path(__file__).resolve().parent.parent / "art" / "surfaces"
     surfaces = {
@@ -288,3 +348,5 @@ def build_materials(asset_tools):
     make_cargo(asset_tools, "LooseRock", surfaces["Gravel"], (0.68, 0.77, 0.81), 1.3)
     make_water(asset_tools)
     make_palette(asset_tools, surfaces["Mud"])
+    make_cab_glazing(asset_tools)
+    make_cab_interiors(asset_tools)

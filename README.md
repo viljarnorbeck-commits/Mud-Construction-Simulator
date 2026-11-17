@@ -43,7 +43,7 @@ Skriptet kontrollerar filens hash, Windows-signaturen och det förväntade certi
 ## Spela
 
 1. Ett nytt spel börjar i grävaren. Stå still och tryck **V** för att sträcka ut armen, dra skopan genom jorden och lyfta lasset. Den gröna markören visar var material flyttas. Tryck **I** för att tippa från den lyfta skopan. **Tab** byter fordon.
-2. För att lasta dumpern med grävaren, parkera flaket inom räckhåll och sväng den lyfta skopan över flaket innan du trycker **I**. Med **J/K/N/M** tar du över hydrauliken. **G** växlar mellan bom/sticka och skopa/sväng. Vid en materialdepå kan **R** lasta dumpern direkt.
+2. För att lasta dumpern med grävaren, parkera flaket inom räckhåll och sväng den lyfta skopan över flaket innan du trycker **I**. Håll in en musknapp och dra för att ta över hydrauliken. **G** växlar piltangenternas funktion. Vid en materialdepå kan **R** lasta dumpern direkt.
 3. Öppna kartan med **9** och välj ett av de ljusblå vadställena. Backa dit med dumpern och tippa med **I**. Sänk bulldozerns blad med **V** och kör framåt för att schakta. **I** sprider jorden som bladet har samlat upp och höjer bladet när lasset är slut. Växla till utjämning med **G**, sänk bladet igen och kör över fyllningen. Ett sänkt blad röjer också träd.
 4. Lasta terränglastbilen och passera den gula startportalen. Kör till den röda målportalen med minst 18 m³ kvar på flaket.
 
@@ -52,8 +52,8 @@ Skriptet kontrollerar filens hash, Windows-signaturen och det förväntade certi
 | Kör och styr | WASD | LT/RT och vänster spak |
 | Kliv i eller ur, byt fordon | E, Tab | Y, styrkors höger |
 | Kamera | Mus, C, scrollhjul | Höger spak, tryck på höger spak för kamerabyte |
-| Hydraulik | Piltangenter, J/K/N/M eller håll in en musknapp och dra | Håll LB och använd höger spak |
-| Verktyg och funktionsgrupp | V, G | X, RB |
+| Hydraulik | Piltangenter, J/K/N/M eller håll in en musknapp och dra | Håll LB och använd höger spak. På grävaren väljer RB sticka och skopa. |
+| Verktyg och funktionsgrupp | V, G | X, RB på övriga maskiner |
 | Tippa, lasta vid depå | I, R | B, styrkors upp |
 | Broms, återställ fordon | Mellanslag, Backsteg | A, styrkors ned |
 | Karta | 9 | Visa-knappen |
@@ -62,7 +62,7 @@ Skriptet kontrollerar filens hash, Windows-signaturen och det förväntade certi
 | Maskin | Upp / ned | Vänster / höger |
 |---|---|---|
 | Volvo L120H hjullastare | Höj / sänk lastararmen | Vinkla skopan bakåt / tippa framåt |
-| Schaktmaskin | Höj / sänk bladet | |
+| Cat D6 schaktmaskin | Höj / sänk bladet | |
 | Dumper och lastbil | Höj / sänk flaket | |
 | Grävmaskin | Höj / sänk bommen | Dra in / sträck ut stickan |
 | Grävmaskin med skopa/sväng vald med **G** | Slut / öppna skopan | Sväng vänster / höger |
@@ -71,17 +71,29 @@ Hjullastaren lastar när du sänker skäret och kör in i en hög. Vinkla skopan
 
 Sänk schaktbladet med **↓** eller slå på markföljning med **V**, och kör sedan framåt med **W**. **G** växlar mellan schaktning och utjämning. Tryck **I** för att lägga ut materialet som ligger framför bladet. Om bladet blir fullt vid fortsatt schaktning lägger maskinen överskottet till höger.
 
-För att gräva manuellt, sätt grävarens tänder mot marken med bom och sticka, byt till skopa/sväng med **G** och slut skopan med **uppåtpilen** eller **J**. Kontrollerna kan redigeras i `Config/DefaultInput.ini` före ompaketering.
+För manuell grävning, sätt tänderna mot marken med bom och sticka. Dra sedan musen åt höger med höger knapp intryckt för att sluta skopan. Med tangentbordet gör du samma sak med **Skift+K**, eller med **uppåtpilen** när skopa/sväng är vald med **G**.
 
 Med **C** växlar du mellan hytten och kameran utanför maskinen. Instrumentet i hytten visar fart, färdriktning och last. På grävaren och bulldozern visar arbetsinstrumentet skärets höjd mot marken. Ett negativt värde betyder att skäret ligger under markytan.
 
-På grävaren styr **vänster musknapp** bommen upp och ner och stickan in och ut. Med **höger musknapp** sluter du skopan genom att dra uppåt, öppnar den genom att dra nedåt och svänger överdelen genom att dra åt sidan. Håll **båda knapparna** för att styra bom och sväng samtidigt. På hjullastaren styr vänster musknapp lastararmens höjd och höger musknapp skopans lutning när du drar uppåt eller nedåt. På schaktmaskinen styr valfri musknapp bladets höjd.
+Tryck **E** för att kliva ur. Till fots följer kameran föraren i tredje person. Rör dig med **WASD** eller vänster spak, spring fortare med **Skift** eller tryck på vänster spak, och hoppa med **mellanslag** eller **A** på handkontrollen. Använd scrollhjulet för att ändra kamerans avstånd och tryck **E** igen när du står nära en hytt.
+
+Grävarens grundreglage följer Volvo-grävaren i Farming Simulator 25.
+
+| Håll in | Dra upp / ned | Dra vänster / höger |
+|---|---|---|
+| Vänster musknapp | Höj / sänk bommen | Sväng vänster / höger |
+| Höger musknapp | Sträck ut / dra in stickan | Öppna / slut skopan |
+| Båda musknapparna | Slut / öppna skopan | Luta skopan åt vänster / höger |
+
+Med tangentbordet höjer och sänker **J/N** bommen, och **K/M** svänger åt höger och vänster. Håll **Skift** för att i stället styra stickan med **J/N** och sluta eller öppna skopan med **K/M**. På handkontroll använder du höger spak med **LB** för bom/sväng, **RB** för sticka/skopa eller båda för sidolutning.
+
+På hjullastaren håller du vänster musknapp och drar uppåt eller nedåt för att röra lastararmen. Dra åt vänster för att vinkla skopan bakåt och åt höger för att tippa. Med höger musknapp kan du också vinkla skopan genom att dra uppåt eller nedåt. På schaktmaskinen styr valfri musknapp bladets höjd.
 
 ## Testa 4K och 120 fps
 
 Standardprofilen sätter ett tak på 120 fps med TSR från 50 % intern upplösning och behåller högsta texturkvaliteten. För att testa med en bestämd bildyta, ange till exempel `-Fullscreen -ResX=3840 -ResY=2160 -ForceRes` på en 4K-skärm med minst 120 Hz. Startargumentet `-MudHighResolution` väljer i stället skrivbordets upplösning med 100 % intern renderingsskala.
 
-**F6** växlar mellan fönster och helskärm. **F7** väljer en profil med 67 % intern upplösning och lägre detaljinställningar. **F8** väljer 100 % intern upplösning med högsta texturkvalitet och 16× anisotropisk filtrering.
+**F6** växlar mellan ett vanligt fönster och kantlös helskärm på skrivbordets upplösning. I Windows Sandbox växlar **Ctrl+Alt+Pause/Break** helskärm för själva Sandbox-fönstret. **F7** väljer en profil med 67 % intern upplösning och lägre detaljinställningar. **F8** väljer 100 % intern upplösning med högsta texturkvalitet och 16× anisotropisk filtrering.
 
 Lägg till `-MudBenchmark` vid start för att mäta 30 sekunder under upprepad tippning vid det södra vadet. Ramtiderna skrivs till `Saved/Benchmark.csv`. Jämför snitt och 99:e percentilen på samma dator med samma upplösning. För 120 fps motsvarar rambudgeten 8,33 ms.
 

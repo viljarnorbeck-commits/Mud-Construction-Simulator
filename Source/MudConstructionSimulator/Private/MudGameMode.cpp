@@ -2,28 +2,34 @@
 
 #include "Camera/CameraComponent.h"
 #include "Components/InputComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Dom/JsonObject.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
+#include "Engine/GameViewportClient.h"
 #include "Engine/Texture2D.h"
 #include "Engine/World.h"
 #include "GameFramework/GameUserSettings.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerInput.h"
 #include "HAL/FileManager.h"
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformMisc.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
 #include "Kismet/KismetSystemLibrary.h"
+#include "InputKeyEventArgs.h"
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/Parse.h"
+#include "MudAudio.h"
 #include "MudMachine.h"
 #include "MudTerrain.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "UnrealClient.h"
 
 namespace
 {
@@ -34,13 +40,14 @@ const FVector2D ParkingOffsets[] = {{-5, -10.5}, {-4, -3.5}, {7, 10.5}, {8, 18},
 constexpr int32 LegacyVehicleCount = static_cast<int32>(EMudMachine::Loader);
 constexpr int32 SaveVersion = 3;
 
-const TCHAR* ArrowHelp(EMudMachine Kind)
+const TCHAR* ArrowHelp(const AMudMachine& Machine)
 {
-    switch (Kind)
+    switch (Machine.Kind)
     {
     case EMudMachine::Loader: return TEXT("Up/Down Lift    Left/Right Roll back / tip");
     case EMudMachine::Dozer: return TEXT("Up/Down Blade    V Ground follow    G Mode");
-    case EMudMachine::Excavator: return TEXT("Arrows Hydraulics    G Function group");
+    case EMudMachine::Excavator: return Machine.bOtherGroup ? TEXT("Arrows: bucket / swing   G: change group") :
+        TEXT("Arrows: boom / stick   G: change group");
     default: return TEXT("Up/Down Raise / lower bed    I Auto tip");
     }
 }
@@ -65,6 +72,33 @@ const TCHAR* MaterialName(Material Type)
     case Material::Rock: return TEXT("Crushed rock");
     default: return TEXT("Soil");
     }
+}
+
+bool TestVehicleSwitch(AMudOperator& Operator, APlayerController& Controller)
+{
+    const auto& Fleet = Operator.GetFleet();
+    auto* PlayerInput = NewObject<UPlayerInput>(&Controller);
+    auto* Bindings = NewObject<UInputComponent>(&Operator);
+    Operator.SetupPlayerInputComponent(Bindings);
+    const TArray<UInputComponent*> Stack{Bindings};
+    const auto SendTab = [&](EInputEvent Event)
+    {
+        PlayerInput->InputKey(FInputKeyEventArgs(nullptr, FInputDeviceId::CreateFromInternalId(0), EKeys::Tab, Event, FPlatformTime::Cycles64()));
+        PlayerInput->ProcessInputStack(Stack, FixedStep, false);
+    };
+    int32 Expected = Fleet.IndexOfByKey(Operator.GetMachine());
+    for (int32 Step = 0; Step < Fleet.Num() + 1; ++Step)
+    {
+        Expected = (Expected + 1) % Fleet.Num();
+        SendTab(IE_Pressed);
+        if (Operator.GetMachine() != Fleet[Expected])
+            return false;
+        SendTab(IE_Repeat);
+        SendTab(IE_Released);
+        if (Operator.GetMachine() != Fleet[Expected])
+            return false;
+    }
+    return true;
 }
 
 bool TestTrackMarks(AMudTerrain& Terrain)
@@ -106,6 +140,97 @@ bool TestTrackMarks(AMudTerrain& Terrain)
     return bStraight && bTurn && bReset && bRoundTrip && bLegacy;
 }
 
+bool TestFallingLoad(AMudTerrain& Terrain)
+{
+    const auto Baseline = Terrain.SaveTerrain();
+    const FVector2D Start = XY(Terrain.Start);
+    const FVector2D Center(FMath::RoundToInt(Start.X), FMath::RoundToInt(Start.Y));
+    TArray<double> Heights;
+    for (int32 Y = -6; Y <= 6; ++Y)
+        for (int32 X = -6; X <= 6; ++X)
+            Heights.Add(Terrain.Height(Center + FVector2D(X, Y)));
+    const auto Fill = [&]()
+    {
+        int32 Index = 0;
+        FVector2D Sum(0, 0);
+        for (int32 Y = -6; Y <= 6; ++Y)
+            for (int32 X = -6; X <= 6; ++X)
+            {
+                const double Added = Terrain.Height(Center + FVector2D(X, Y)) - Heights[Index++];
+                Sum.X += Added;
+                Sum.Y += Added * X;
+            }
+        return Sum;
+    };
+    Load Gravel;
+    Gravel.Add(Material::Gravel, 2.0);
+    Terrain.Pour(FVector(Center.X, Center.Y, Terrain.Height(Center) + 2.0), FVector::ForwardVector, 1.67, Gravel);
+    Terrain.AdvancePours(0.15);
+    const bool bAirborne = Fill().IsNearlyZero();
+    const auto InFlight = Terrain.SaveTerrain();
+    const bool bRoundTrip = Terrain.RestoreTerrain(Baseline) && Terrain.RestoreTerrain(InFlight);
+    for (int32 Step = 0; Step < 60; ++Step)
+        Terrain.AdvancePours(FixedStep);
+    const auto Placed = Fill();
+    const bool bLanded = FMath::IsNearlyEqual(Placed.X, 2.0, 0.002) && Placed.Y / 2.0 > 0.25;
+    UE_LOG(LogTemp, Display, TEXT("Falling gravel: airborne %d, save %d, landed %.3f m3, advanced %.2f m"),
+        bAirborne, bRoundTrip, Placed.X, Placed.Y / 2.0);
+    return Terrain.RestoreTerrain(Baseline) && bAirborne && bRoundTrip && bLanded;
+}
+
+bool TestWheelSteering(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
+{
+    const auto TerrainBefore = Terrain.SaveTerrain();
+    bool bPassed = true;
+    for (const EMudMachine Kind : {EMudMachine::Dumper, EMudMachine::Loader, EMudMachine::Truck})
+    {
+        auto* Machine = Fleet[static_cast<int32>(Kind)];
+        const FVector2D Start = Machine->Position;
+        const auto Reset = [&]()
+        {
+            Machine->StopWork();
+            Machine->Position = Start;
+            Machine->Heading = 0;
+            Machine->RolledSide = 0;
+            Machine->UpdatePose(Terrain);
+        };
+        const bool bArticulated = Machine->ArticulationLimit() > 0;
+        const auto Drive = [&](double Throttle, double Steering, bool bBrake, int32 Steps)
+        {
+            for (int32 I = 0; I < Steps; ++I)
+                Machine->Drive(FixedStep, Throttle, Steering, bBrake, Terrain, Fleet);
+        };
+        Drive(0, 1, true, 42);
+        const double ParkedYaw = Machine->Heading;
+        const double ParkedBend = Machine->GetArticulation();
+        const bool bParked = bArticulated ? ParkedYaw > 5 && ParkedBend < -10 && Machine->Position.Y < Start.Y - 0.1 :
+            FMath::IsNearlyZero(ParkedYaw) && FVector2D::DistSquared(Machine->Position, Start) < 0.0001;
+        Drive(0, 0, true, 20);
+        const bool bHolds = FMath::IsNearlyEqual(Machine->Heading, ParkedYaw, 0.001) &&
+            FMath::IsNearlyEqual(Machine->GetArticulation(), ParkedBend, 0.001);
+
+        Reset();
+        Drive(0, 1, true, 65);
+        const FVector2D BeforeForward = Machine->Position;
+        const double BeforeForwardYaw = Machine->Heading;
+        Drive(0.5, 1, false, 65);
+        const bool bForward = Machine->Position.X > BeforeForward.X + 0.25 && Machine->Heading > BeforeForwardYaw + 2;
+
+        Reset();
+        Drive(0, 1, true, 65);
+        const FVector2D BeforeReverse = Machine->Position;
+        const double BeforeReverseYaw = Machine->Heading;
+        Drive(-0.5, 1, false, 65);
+        const bool bReverse = Machine->Position.X < BeforeReverse.X - 0.25 && Machine->Heading < BeforeReverseYaw - 2;
+        Reset();
+
+        UE_LOG(LogTemp, Display, TEXT("Wheel steering %s: parked %d (yaw %.1f, bend %.1f), held %d, forward %d, reverse %d"),
+            Machine->Name(), bParked, ParkedYaw, ParkedBend, bHolds, bForward, bReverse);
+        bPassed &= bParked && bHolds && bForward && bReverse;
+    }
+    return Terrain.RestoreTerrain(TerrainBefore) && bPassed;
+}
+
 bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
 {
     const FVector2D Center = XY(Terrain.Start);
@@ -139,6 +264,7 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
     Excavator->ToggleUnload();
     for (int32 I = 0; I < 225; ++I)
         Excavator->Work(FixedStep, 0, 0, Terrain, Fleet);
+    Terrain.SettlePours();
     const bool bTipped = Excavator->Cargo.Volume() < Epsilon && FMath::IsNearlyEqual(Before, GroundVolume(), 0.005);
 
     auto* Dozer = Fleet[0];
@@ -204,6 +330,7 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
     Dumper->ToggleUnload();
     for (int32 I = 0; I < 160; ++I)
         Dumper->Work(FixedStep, 0, 0, Terrain, Fleet);
+    Terrain.SettlePours();
     const bool bDumpedBed = Dumper->Cargo.Volume() < Epsilon && !Dumper->IsTipping() &&
         FMath::IsNearlyEqual(Before, GroundVolume(), 0.005);
     Excavator->Position = Center + FVector2D(-10, -10);
@@ -223,18 +350,26 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
     MachineMotion::AccumulateMouseDrag(LeftDrag, true, false, MachineMotion::MouseTool::Excavator, 0.6, 0.6);
     for (int32 I = 0; I < 18; ++I)
         Excavator->Work(FixedStep, 0, 0, Terrain, Fleet, LeftDrag);
-    const bool bMouseArm = Excavator->Boom > StartBoom + 1 && Excavator->Stick > StartStick + 1 &&
-        FMath::IsNearlyEqual(StartCurl, Excavator->Curl) && FMath::IsNearlyEqual(StartSwing, Excavator->Swing);
+    const bool bMouseArm = Excavator->Boom > StartBoom + 1 && Excavator->Swing > StartSwing + 1 &&
+        FMath::IsNearlyEqual(StartCurl, Excavator->Curl) && FMath::IsNearlyEqual(StartStick, Excavator->Stick);
 
     Excavator->ChangeGroup();
     Excavator->Halt();
-    const double RaisedBoom = Excavator->Boom, ExtendedStick = Excavator->Stick;
+    const double RaisedBoom = Excavator->Boom, TurnedSwing = Excavator->Swing;
     MachineMotion::HydraulicInput RightDrag;
     MachineMotion::AccumulateMouseDrag(RightDrag, false, true, MachineMotion::MouseTool::Excavator, 0.6, 0.6);
     for (int32 I = 0; I < 18; ++I)
         Excavator->Work(FixedStep, 0, 0, Terrain, Fleet, RightDrag);
-    const bool bMouseBucket = Excavator->Curl > StartCurl + 1 && Excavator->Swing > StartSwing + 1 &&
-        FMath::IsNearlyEqual(RaisedBoom, Excavator->Boom) && FMath::IsNearlyEqual(ExtendedStick, Excavator->Stick);
+    const bool bMouseBucket = Excavator->Curl > StartCurl + 1 && Excavator->Stick > StartStick + 1 &&
+        FMath::IsNearlyEqual(RaisedBoom, Excavator->Boom) && FMath::IsNearlyEqual(TurnedSwing, Excavator->Swing);
+    Excavator->Halt();
+    const FVector FlatEdge = Excavator->ToolPoint();
+    MachineMotion::HydraulicInput TiltDrag;
+    MachineMotion::AccumulateMouseDrag(TiltDrag, true, true, MachineMotion::MouseTool::Excavator, 0.7, 0);
+    for (int32 I = 0; I < 18; ++I)
+        Excavator->Work(FixedStep, 0, 0, Terrain, Fleet, TiltDrag);
+    const bool bMouseTilt = Excavator->BucketTilt > 2 && FVector::DistSquared(FlatEdge, Excavator->ToolPoint()) > 0.0001;
+    Terrain.SettlePours();
 
     Dozer->Halt();
     const double StartBlade = Dozer->Blade;
@@ -285,6 +420,7 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
         Loader->Work(FixedStep, 1, 0, Terrain, Fleet);
     for (int32 I = 0; I < 117; ++I)
         Loader->Work(FixedStep, 0, 1, Terrain, Fleet);
+    Terrain.SettlePours();
     const bool bLoaderDump = Loader->Cargo.Volume() < Epsilon && FMath::IsNearlyEqual(PileGround, GroundVolume(), 0.005);
     UE_LOG(LogTemp, Display, TEXT("Wheel loader: controls %d, scoop %.2f m3 (%d), tip %d"), bLoaderControls,
         Loaded, bLoaderScoop, bLoaderDump);
@@ -298,6 +434,7 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
     for (int32 I = 0; I < 120; ++I)
         Dumper->Work(FixedStep, -1, 0, Terrain, Fleet);
     const bool bLoweredBed = !Dumper->IsTipping();
+    Terrain.SettlePours();
     const double ManualDump = GroundVolume() - PileGround;
     const bool bManualBed = bHeldBed && bLoweredBed && FMath::IsNearlyEqual(ManualDump, 1.0, 0.005);
     UE_LOG(LogTemp, Display, TEXT("Manual dump bed: held %d, lowered %d, dumped %.2f m3"), bHeldBed, bLoweredBed, ManualDump);
@@ -328,21 +465,41 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
     const FVector2D BladeEdge = XY(Dozer->ToolPoint());
     Terrain.Deposit(BladeEdge, 1.1, PushPile);
     const double BeforeOverflow = GroundVolume();
-    const double SideBefore = Terrain.Height(BladeEdge + FVector2D(-0.65, 2.55));
+    const FVector2D RightBank = BladeEdge + FVector2D(-0.65, 2.55);
+    const FVector2D LeftBank = BladeEdge + FVector2D(-0.65, -2.55);
+    const double RightBefore = Terrain.Height(RightBank), LeftBefore = Terrain.Height(LeftBank);
     for (int32 I = 0; I < 32; ++I)
         Dozer->Work(FixedStep, 0, 0, Terrain, Fleet);
-    const double SideGain = Terrain.Height(BladeEdge + FVector2D(-0.65, 2.55)) - SideBefore;
-    const bool bFullPush = SideGain > 0.05 && FMath::IsNearlyEqual(Dozer->Cargo.Volume(), Dozer->Capacity(), 0.005) &&
+    const double RightGain = Terrain.Height(RightBank) - RightBefore, LeftGain = Terrain.Height(LeftBank) - LeftBefore;
+    const bool bFullPush = RightGain > 0.05 && LeftGain > 0.025 && FMath::IsNearlyEqual(Dozer->Cargo.Volume(), Dozer->Capacity(), 0.005) &&
         FMath::IsNearlyEqual(BeforeOverflow, GroundVolume(), 0.005);
-    UE_LOG(LogTemp, Display, TEXT("Dozer material transport: manual %.2f m3 (%d), windrow %.2f m (%d)"),
-        ManualPush, bManualPush, SideGain, bFullPush);
+
+    Excavator->StopWork();
+    Excavator->Position = Center + FVector2D(-11, -9);
+    Excavator->Boom = 48;
+    Excavator->Stick = -32;
+    Excavator->Curl = -93;
+    Excavator->Swing = Excavator->BucketTilt = 0;
+    Excavator->Cargo = {};
+    Excavator->Cargo.Add(Material::Soil, 0.45);
+    Excavator->UpdatePose(Terrain);
+    const double ManualTipGround = GroundVolume();
+    for (int32 I = 0; I < 12; ++I)
+        Excavator->Work(FixedStep, 0, 0, Terrain, {});
+    const bool bManualTipAirborne = Excavator->Cargo.Volume() < Epsilon && FMath::IsNearlyEqual(ManualTipGround, GroundVolume(), 0.002);
+    Terrain.SettlePours();
+    const bool bManualTip = bManualTipAirborne && FMath::IsNearlyEqual(GroundVolume() - ManualTipGround, 0.45, 0.002);
+    UE_LOG(LogTemp, Display, TEXT("Manual bucket tip: airborne %d, mass settled %d"), bManualTipAirborne, bManualTip);
+    UE_LOG(LogTemp, Display, TEXT("Dozer material transport: manual %.2f m3 (%d), windrows left %.2f m, right %.2f m (%d)"),
+        ManualPush, bManualPush, LeftGain, RightGain, bFullPush);
     UE_LOG(LogTemp, Display, TEXT("Manual blade directions: %d"), bBladeControls);
-    UE_LOG(LogTemp, Display, TEXT("Mouse hydraulics: arm %d, bucket and swing %d, blade %d"), bMouseArm, bMouseBucket, bMouseBlade);
+    UE_LOG(LogTemp, Display, TEXT("Mouse hydraulics: boom/swing %d, stick/curl %d, side tilt %d, blade %d"),
+        bMouseArm, bMouseBucket, bMouseTilt, bMouseBlade);
     UE_LOG(LogTemp, Display, TEXT("Machine earthwork: bucket %.2f m3 over %.2f m, dug %d, tipped %d, manual %.2f m3 (%d); blade %.2f m3, still %d, cut %d, spread %d, graded %d (%.2f m); dumper %.2f m3, loaded %d, tipped %d"),
         Dig, Sweep, bDug, bTipped, Manual, bManualDig, Cut, bStationaryBlade, bCut, bSpread, bGraded, GradeDrop, BedLoad, bLoadedBed, bDumpedBed);
     return bDug && bTipped && bManualDig && bStationaryBlade && bCut && bSpread && bGraded &&
-        bLoadedBed && bDumpedBed && bMouseArm && bMouseBucket && bMouseBlade &&
-        bBladeControls && bLoaderControls && bLoaderScoop && bLoaderDump && bManualBed && bManualPush && bFullPush;
+        bLoadedBed && bDumpedBed && bMouseArm && bMouseBucket && bMouseTilt && bMouseBlade &&
+        bBladeControls && bLoaderControls && bLoaderScoop && bLoaderDump && bManualBed && bManualPush && bFullPush && bManualTip;
 }
 }
 
@@ -359,6 +516,13 @@ AMudOperator::AMudOperator()
     Camera = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
     Camera->SetupAttachment(RootComponent);
     Camera->SetFieldOfView(80.f);
+    FootAvatar = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("FootAvatar"));
+    FootAvatar->SetupAttachment(RootComponent);
+    FootAvatar->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    FootAvatar->SetVisibility(false);
+    FootAvatar->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickPoseWhenRendered;
+    FootAvatar->AddTickPrerequisiteActor(this);
+    Audio = CreateDefaultSubobject<UMudAudio>(TEXT("ValleyAudio"));
 }
 
 void AMudOperator::BeginPlay()
@@ -407,8 +571,15 @@ void AMudOperator::BeginPlay()
         const bool bSavedFinish = Terrain->RestoreTerrain(Filled) && HasFinish(*Terrain->SaveTerrain(), 1);
         const bool bRestored = Terrain->RestoreTerrain(Before) && FMath::IsNearlyEqual(Terrain->Height(Start), Initial, 0.002);
         const bool bTrackMarks = TestTrackMarks(*Terrain);
+        const bool bFallingLoad = TestFallingLoad(*Terrain);
+        const bool bSteering = Fleet.Num() == UE_ARRAY_COUNT(ParkingOffsets) && TestWheelSteering(*Terrain, Fleet);
         bool bPassed = Fleet.Num() == UE_ARRAY_COUNT(ParkingOffsets) && bRaised && bRestored && FMath::IsNearlyEqual(Removed, 2.0, 0.002)
-            && TestMachineWork(*Terrain, Fleet) && bTrackMarks && bFillFinish && bCutFinish && bSavedFinish;
+            && TestMachineWork(*Terrain, Fleet) && bSteering && bTrackMarks && bFallingLoad && bFillFinish && bCutFinish && bSavedFinish;
+        Active = INDEX_NONE;
+        auto* PC = GetWorld()->GetFirstPlayerController();
+        const bool bTabSwitch = PC && !Fleet.IsEmpty() && TestVehicleSwitch(*this, *PC);
+        bPassed &= bTabSwitch;
+        UE_LOG(LogTemp, Display, TEXT("Tab vehicle switching: %s"), bTabSwitch ? TEXT("passed") : TEXT("failed"));
         UE_LOG(LogTemp, Display, TEXT("Earthwork surface finish: fill %d, cut %d, save %d"), bFillFinish, bCutFinish, bSavedFinish);
         FString Report;
         if (FParse::Value(FCommandLine::Get(), TEXT("MudSmokeReport="), Report))
@@ -440,7 +611,10 @@ void AMudOperator::BeginPlay()
         bShowHelp = false;
     }
     Terrain->UpdateTiles(GetPosition());
+    InitializeFootAvatar();
+    ResetFootMotion(LookYaw);
     UpdateCamera();
+    Audio->Initialize();
 }
 
 AMudMachine* AMudOperator::GetMachine() const { return Fleet.IsValidIndex(Active) ? Fleet[Active] : nullptr; }
@@ -465,16 +639,36 @@ void AMudOperator::Tick(float Dt)
     {
         // Keep large frame times within the terrain solver's step size and advance on every rendered frame.
         const int32 Substeps = FMath::CeilToInt(FrameStep / (FixedStep + 0.0001));
-        const double MouseScale = FixedStep / FrameStep;
-        const FVector2D Hydraulics(
-            VerticalTap.Resolve(HydraulicA, FrameStep) + (bPadHydraulics ? PadHydraulicA : 0),
-            HorizontalTap.Resolve(HydraulicB, FrameStep) + (bPadHydraulics ? PadHydraulicB : 0));
-        const MachineMotion::HydraulicInput Mouse{
+        const double MouseScale = MachineMotion::MouseValveScale(FrameStep);
+        FVector2D Hydraulics(VerticalTap.Resolve(HydraulicA, FrameStep), HorizontalTap.Resolve(HydraulicB, FrameStep));
+        MachineMotion::HydraulicInput Direct{
             MouseHydraulics.Boom * MouseScale, MouseHydraulics.Stick * MouseScale,
-            MouseHydraulics.Curl * MouseScale, MouseHydraulics.Swing * MouseScale
+            MouseHydraulics.Curl * MouseScale, MouseHydraulics.Swing * MouseScale, MouseHydraulics.Tilt * MouseScale
         };
+        const auto* Machine = GetMachine();
+        if (Machine && Machine->Kind == EMudMachine::Excavator)
+        {
+            if (const auto* PC = Cast<APlayerController>(GetController()))
+            {
+                const auto Held = [PC](FKey Key)
+                {
+                    return PC->IsInputKeyDown(Key) || PC->WasInputKeyJustPressed(Key);
+                };
+                const bool Shift = Held(EKeys::LeftShift) || Held(EKeys::RightShift);
+                MachineMotion::AddExcavatorKeys(Direct, Shift, double(Held(EKeys::K)) - double(Held(EKeys::M)),
+                    double(Held(EKeys::J)) - double(Held(EKeys::N)));
+            }
+            MachineMotion::AccumulateMouseDrag(Direct, bPadHydraulics, bPadSecondHydraulics,
+                MachineMotion::MouseTool::Excavator, PadHydraulicB, PadHydraulicA);
+        }
+        else
+        {
+            Hydraulics += FVector2D(HydraulicKeyA, HydraulicKeyB);
+            if (bPadHydraulics)
+                Hydraulics += FVector2D(PadHydraulicA, PadHydraulicB);
+        }
         for (int32 Index = 0; Index < Substeps; ++Index)
-            Step(FrameStep / Substeps, Hydraulics, Mouse);
+            Step(FrameStep / Substeps, Hydraulics, Direct);
         MouseHydraulics = {};
     }
     const FVector2D Location = GetPosition();
@@ -483,14 +677,16 @@ void AMudOperator::Tick(float Dt)
     const int32 Width = Terrain->GetWorldSize();
     if (Location.X < 0 || Location.Y < 0 || Location.X > Width || Location.Y > Width)
         return;
-    UpdateCamera();
+    UpdateCamera(Dt);
+    Audio->Mix(Dt, *Terrain, Location, GetMachine(), Fleet, bCab, bBrake);
     if (BenchmarkStart > 0)
         UpdateBenchmark();
 }
 
-void AMudOperator::Step(double Dt, const FVector2D& Hydraulics, const MachineMotion::HydraulicInput& Mouse)
+void AMudOperator::Step(double Dt, const FVector2D& Hydraulics, const MachineMotion::HydraulicInput& Direct)
 {
     TRACE_CPUPROFILER_EVENT_SCOPE(MudSimulationStep);
+    Terrain->AdvancePours(Dt);
     auto* Machine = GetMachine();
     if (Machine)
     {
@@ -498,20 +694,10 @@ void AMudOperator::Step(double Dt, const FVector2D& Hydraulics, const MachineMot
             bCruise = false;
         const double Command = bCruise && FMath::Abs(Throttle) < 0.1 ? Cruise : Throttle;
         Machine->Drive(Dt, Command, Steering, bBrake, *Terrain, Fleet);
-        Machine->Work(Dt, Hydraulics.X, Hydraulics.Y, *Terrain, Fleet, Mouse);
+        Machine->Work(Dt, Hydraulics.X, Hydraulics.Y, *Terrain, Fleet, Direct);
     }
     else
-    {
-        const FVector2D Forward = XY(FRotator(0, LookYaw, 0).Vector());
-        const FVector2D Right(-Forward.Y, Forward.X);
-        FVector2D Walk = Forward * Throttle + Right * Steering;
-        if (Walk.SizeSquared() > 1.0)
-            Walk.Normalize();
-        OnFoot += Walk * (Dt * 5.0);
-        const double Max = Terrain->GetWorldSize() - 3;
-        OnFoot.X = FMath::Clamp(OnFoot.X, 3.0, Max);
-        OnFoot.Y = FMath::Clamp(OnFoot.Y, 3.0, Max);
-    }
+        StepOnFoot(Dt);
 
     // Parked machines continue tipping, and their chassis follow terrain edits underneath them.
     for (auto* Other : Fleet)
@@ -543,6 +729,8 @@ void AMudOperator::Step(double Dt, const FVector2D& Hydraulics, const MachineMot
                 const double Available = Machine->Capacity() - Machine->Cargo.Volume();
                 auto Load = Terrain->DrawFromPile(*Nearest, Machine->Position, FMath::Min(Available, Dt * 6.4));
                 Machine->Cargo.Receive(Load);
+                if (Load.Volume() > Epsilon)
+                    Machine->RecordEarthSound(Load.Volume() / Dt, Load.DominantMaterial());
                 if (Load.Volume() < Epsilon)
                 {
                     bDepotLoad = false;
@@ -570,14 +758,21 @@ void AMudOperator::Step(double Dt, const FVector2D& Hydraulics, const MachineMot
             bFinished = true;
             Notify(TEXT("Delivery complete. The valley road is open."));
             Save();
+            Audio->Interface(TEXT("Goal"));
         }
     }
 }
 
-void AMudOperator::UpdateCamera()
+void AMudOperator::UpdateCamera(float Dt)
 {
     auto* Machine = GetMachine();
-    if (Machine && bCab)
+    FootAvatar->SetVisibility(!Machine);
+    if (!Machine)
+    {
+        UpdateFootView(Dt);
+        return;
+    }
+    if (bCab)
     {
         const FTransform Seat = Machine->CabView();
         Camera->SetWorldLocationAndRotation(Seat.GetLocation(),
@@ -654,13 +849,13 @@ void AMudOperator::UpdateBenchmark()
 void AMudOperator::MoveMouseX(float Value)
 {
     if (Value != 0 && !ApplyMouseDrag(Value, 0))
-        PanView(Value * 0.23, 0);
+        PanView(Value * MachineMotion::MouseLookDegreesPerCount, 0);
 }
 
 void AMudOperator::MoveMouseY(float Value)
 {
     if (Value != 0 && !ApplyMouseDrag(0, Value))
-        PanView(0, Value * 0.23);
+        PanView(0, Value * MachineMotion::MouseLookDegreesPerCount);
 }
 
 bool AMudOperator::ApplyMouseDrag(double X, double Y)
@@ -677,33 +872,49 @@ bool AMudOperator::ApplyMouseDrag(double X, double Y)
     case EMudMachine::Loader: Tool = MachineMotion::MouseTool::Loader; break;
     default: return false;
     }
-    // Unreal aggregates mouse axes for the frame, including motion just before a button release.
-    const auto UsedDuringFrame = [PC](const FKey Key)
+    const auto Pressed = [PC](const FKey Key)
     {
-        return PC->IsInputKeyDown(Key) || PC->WasInputKeyJustPressed(Key) || PC->WasInputKeyJustReleased(Key);
+        return PC->IsInputKeyDown(Key) || PC->WasInputKeyJustPressed(Key);
     };
-    const bool bLeft = UsedDuringFrame(EKeys::LeftMouseButton);
-    const bool bRight = UsedDuringFrame(EKeys::RightMouseButton);
+    bool bLeft = Pressed(EKeys::LeftMouseButton);
+    bool bRight = Pressed(EKeys::RightMouseButton);
+    if (!bLeft && !bRight)
+    {
+        bLeft = PC->WasInputKeyJustReleased(EKeys::LeftMouseButton);
+        bRight = PC->WasInputKeyJustReleased(EKeys::RightMouseButton);
+    }
     if (!bLeft && !bRight)
         return false;
-    MachineMotion::AccumulateMouseDrag(MouseHydraulics, bLeft, bRight, Tool, X * 0.20, Y * 0.20);
+    const double Sensitivity = MachineMotion::MouseDragSensitivity(Tool);
+    MachineMotion::AccumulateMouseDrag(MouseHydraulics, bLeft, bRight, Tool, X * Sensitivity, Y * Sensitivity);
     return true;
 }
 
 void AMudOperator::MovePadX(float Value)
 {
-    if (bPadHydraulics)
-        PadHydraulicB = Value;
-    else if (GetWorld())
+    PadHydraulicB = Value;
+    if (!IsPadHydraulicsActive() && GetWorld())
         PanView(Value * GetWorld()->GetDeltaSeconds() * 96, 0);
 }
 
 void AMudOperator::MovePadY(float Value)
 {
-    if (bPadHydraulics)
-        PadHydraulicA = Value;
-    else if (GetWorld())
+    PadHydraulicA = Value;
+    if (!IsPadHydraulicsActive() && GetWorld())
         PanView(0, Value * GetWorld()->GetDeltaSeconds() * 72);
+}
+
+bool AMudOperator::IsPadHydraulicsActive() const
+{
+    const auto* Machine = GetMachine();
+    return Machine && (bPadHydraulics || (bPadSecondHydraulics && Machine->Kind == EMudMachine::Excavator));
+}
+
+void AMudOperator::PadSecondHydraulicsOn()
+{
+    bPadSecondHydraulics = true;
+    if (const auto* Machine = GetMachine(); Machine && Machine->Kind != EMudMachine::Excavator)
+        ChangeGroup();
 }
 
 void AMudOperator::PanView(double Yaw, double Pitch)
@@ -715,7 +926,8 @@ void AMudOperator::PanView(double Yaw, double Pitch)
         return;
     }
     LookYaw = FRotator::NormalizeAxis(LookYaw + Yaw);
-    LookPitch = FMath::Clamp(LookPitch + Pitch, -76.0, 34.0);
+    LookPitch = GetMachine() ? FMath::Clamp(LookPitch + Pitch, -76.0, 34.0)
+        : FMath::Clamp(LookPitch + Pitch, -58.0, 12.0);
 }
 
 void AMudOperator::SwitchCamera()
@@ -726,9 +938,28 @@ void AMudOperator::SwitchCamera()
     CabYaw = 0;
     CabPitch = -15;
     Camera->SetFieldOfView(bCab ? 92.f : 80.f);
+    Audio->Interface(TEXT("Switch"));
 }
 
-void AMudOperator::Zoom(float Value) { Distance = FMath::Clamp(Distance - Value * 1.4, 5.0, 33.0); }
+void AMudOperator::SwitchMap()
+{
+    bShowMap = !bShowMap;
+    Audio->Interface(TEXT("Switch"));
+}
+
+void AMudOperator::SwitchHelp()
+{
+    bShowHelp = !bShowHelp;
+    Audio->Interface(TEXT("Switch"));
+}
+
+void AMudOperator::Zoom(float Value)
+{
+    if (GetMachine())
+        Distance = FMath::Clamp(Distance - Value * 1.4, 5.0, 33.0);
+    else
+        FootDistance = FMath::Clamp(FootDistance - Value * 0.45, 2.4, 6.5);
+}
 
 void AMudOperator::EnterExit()
 {
@@ -738,30 +969,47 @@ void AMudOperator::EnterExit()
     MouseHydraulics = {};
     if (auto* Machine = GetMachine())
     {
+        const TOptional<FVector2D> Exit = ExitPosition(*Machine);
+        if (!Exit.IsSet())
+        {
+            Notify(TEXT("No room to step out. Move the machine first."));
+            return;
+        }
         Machine->Halt();
+        Audio->Play(TEXT("Door"), Machine->CabView().GetLocation(), 0.62f, 0.94f);
         if (bCab)
             SwitchCamera();
-        OnFoot = Machine->Position + FVector2D(0, -2.7);
+        OnFoot = Exit.GetValue();
         LookYaw = FRotator::NormalizeAxis(LookYaw + Machine->Heading);
-        LookPitch = -5;
+        LookPitch = -12;
         Active = INDEX_NONE;
-        bDepotLoad = bCruise = false;
+        ResetFootMotion(Machine->Heading);
+        bDepotLoad = bCruise = bBrake = false;
+        UpdateCamera();
         return;
     }
-    double Best = FMath::Square(6.0);
+    if (!bFootGrounded)
+        return;
+    double Best = FMath::Square(3.35);
+    int32 Entry = INDEX_NONE;
     for (int32 Id = 0; Id < Fleet.Num(); ++Id)
     {
-        const double Dist = FVector2D::DistSquared(OnFoot, Fleet[Id]->Position);
+        const double Dist = FVector2D::DistSquared(OnFoot, XY(Fleet[Id]->CabView().GetLocation()) / 100.0);
         if (Dist < Best)
         {
-            Active = Id;
+            Entry = Id;
             Best = Dist;
         }
     }
-    if (auto* Machine = GetMachine())
+    if (Entry != INDEX_NONE)
     {
+        Active = Entry;
+        const auto* Machine = GetMachine();
+        Audio->Play(TEXT("Door"), Machine->CabView().GetLocation(), 0.72f, 1.04f);
         LookYaw = FRotator::NormalizeAxis(LookYaw - Machine->Heading);
         LookPitch = -21;
+        bBrake = false;
+        UpdateCamera();
     }
 }
 
@@ -774,21 +1022,39 @@ void AMudOperator::SwapVehicle()
         Old->Halt();
     MouseHydraulics = {};
     Active = (Active + 1) % Fleet.Num();
+    Audio->Interface(TEXT("Switch"));
     CabYaw = 0;
     CabPitch = -15;
     LookYaw = GetMachine()->Kind == EMudMachine::Excavator ? -55 : -35;
     LookPitch = GetMachine()->Kind == EMudMachine::Excavator ? -27 : -21;
     bDepotLoad = bCruise = false;
+    UpdateCamera();
 }
 
-void AMudOperator::WorkTool() { if (auto* Machine = GetMachine()) Machine->ToggleTool(); }
-void AMudOperator::ChangeGroup() { if (auto* Machine = GetMachine()) Machine->ChangeGroup(); }
+void AMudOperator::WorkTool()
+{
+    if (auto* Machine = GetMachine())
+    {
+        Machine->ToggleTool();
+        Audio->Interface(TEXT("Switch"));
+    }
+}
+
+void AMudOperator::ChangeGroup()
+{
+    if (auto* Machine = GetMachine())
+    {
+        Machine->ChangeGroup();
+        Audio->Interface(TEXT("Switch"));
+    }
+}
 void AMudOperator::Unload()
 {
     if (auto* Machine = GetMachine())
     {
         Machine->ToggleUnload();
         bDepotLoad = false;
+        Audio->Interface(TEXT("Switch"));
     }
 }
 
@@ -817,6 +1083,8 @@ void AMudOperator::Service()
 
 void AMudOperator::Notify(const FString& Text)
 {
+    if (Message != Text)
+        Audio->Interface(TEXT("Notice"));
     Message = Text;
     MessageTime = 4;
 }
@@ -875,9 +1143,12 @@ void AMudOperator::Save()
         Row->SetNumberField(TEXT("x"), Machine->Position.X);
         Row->SetNumberField(TEXT("y"), Machine->Position.Y);
         Row->SetNumberField(TEXT("heading"), Machine->Heading);
+        if (Machine->ArticulationLimit() > 0)
+            Row->SetNumberField(TEXT("articulation"), Machine->GetArticulation());
         Row->SetNumberField(TEXT("boom"), Machine->Boom);
         Row->SetNumberField(TEXT("stick"), Machine->Stick);
         Row->SetNumberField(TEXT("curl"), Machine->Curl);
+        Row->SetNumberField(TEXT("bucketTilt"), Machine->BucketTilt);
         Row->SetNumberField(TEXT("swing"), Machine->Swing);
         Row->SetNumberField(TEXT("blade"), Machine->Blade);
         Row->SetNumberField(TEXT("rolled"), Machine->RolledSide);
@@ -925,7 +1196,7 @@ void AMudOperator::Load()
     struct FRestore
     {
         FVector2D XY;
-        double Heading, Boom, Stick, Curl, Swing, Blade;
+        double Heading, Articulation, Boom, Stick, Curl, BucketTilt, Swing, Blade;
         int32 RolledSide;
         Earthwork::Load Cargo;
     };
@@ -942,8 +1213,12 @@ void AMudOperator::Load()
         if (!(*Vehicles)[Id]->TryGetObject(Row) ||
             !(*Row)->TryGetNumberField(TEXT("x"), Entry.XY.X) || !(*Row)->TryGetNumberField(TEXT("y"), Entry.XY.Y) ||
             !ValidPosition(Entry.XY) || !(*Row)->TryGetNumberField(TEXT("heading"), Entry.Heading) ||
+            ((*Row)->HasField(TEXT("articulation")) && (!(*Row)->TryGetNumberField(TEXT("articulation"), Entry.Articulation) ||
+                !FMath::IsFinite(Entry.Articulation) || FMath::Abs(Entry.Articulation) > Fleet[Id]->ArticulationLimit())) ||
             !(*Row)->TryGetNumberField(TEXT("boom"), Entry.Boom) || !(*Row)->TryGetNumberField(TEXT("stick"), Entry.Stick) ||
             !(*Row)->TryGetNumberField(TEXT("curl"), Entry.Curl) || !(*Row)->TryGetNumberField(TEXT("swing"), Entry.Swing) ||
+            ((*Row)->HasField(TEXT("bucketTilt")) && (!(*Row)->TryGetNumberField(TEXT("bucketTilt"), Entry.BucketTilt) ||
+                !FMath::IsFinite(Entry.BucketTilt) || FMath::Abs(Entry.BucketTilt) > MachineMotion::MaxBucketTilt)) ||
             !(*Row)->TryGetNumberField(TEXT("blade"), Entry.Blade) ||
             !(*Row)->TryGetNumberField(TEXT("rolled"), Entry.RolledSide) || FMath::Abs(Entry.RolledSide) > 1 ||
             !(*Row)->TryGetArrayField(TEXT("cargo"), Cargo) || Cargo->Num() != MaterialCount)
@@ -993,11 +1268,13 @@ void AMudOperator::Load()
         Machine->Boom = Entry.Boom;
         Machine->Stick = Entry.Stick;
         Machine->Curl = Entry.Curl;
+        Machine->BucketTilt = Entry.BucketTilt;
         Machine->Swing = Entry.Swing;
         Machine->Blade = Entry.Blade;
         Machine->RolledSide = Entry.RolledSide;
         Machine->Cargo = Entry.Cargo;
         Machine->StopWork();
+        Machine->RestoreArticulation(Entry.Articulation);
         Machine->bOtherGroup = Machine->bGrade = false;
         Machine->UpdatePose(*Terrain);
     }
@@ -1005,6 +1282,10 @@ void AMudOperator::Load()
         SwitchCamera();
     Active = Chosen;
     OnFoot = Foot;
+    ResetFootMotion(LookYaw);
+    if (!GetMachine())
+        LookPitch = -12;
+    UpdateCamera();
     bDelivery = bSavedDelivery;
     bFinished = bSavedComplete;
     bDepotLoad = bCruise = false;
@@ -1061,10 +1342,31 @@ void AMudOperator::ApplyQualityMode(bool bUseDesktop)
 
 void AMudOperator::ToggleFullscreen()
 {
+    const auto* Viewport = GEngine->GameViewport ? GEngine->GameViewport->Viewport : nullptr;
+    if (!Viewport)
+        return;
+
     auto* Settings = GEngine->GetGameUserSettings();
-    const bool bFullscreen = Settings->GetFullscreenMode() != EWindowMode::Windowed;
-    Settings->SetFullscreenMode(bFullscreen ? EWindowMode::Windowed : EWindowMode::WindowedFullscreen);
-    Settings->ApplySettings(false);
+    const bool bFullscreen = Viewport->IsFullscreen();
+    const FIntPoint Desktop = Settings->GetDesktopResolution();
+    if (bFullscreen)
+    {
+        const FIntPoint DefaultWindow(1600, 900);
+        const FIntPoint Window = WindowedSize.X > 0 && WindowedSize.Y > 0 ? WindowedSize : DefaultWindow;
+        Settings->SetScreenResolution(FIntPoint(
+            FMath::Min(Window.X, FMath::Max(1, Desktop.X - 80)),
+            FMath::Min(Window.Y, FMath::Max(1, Desktop.Y - 100))));
+        Settings->SetFullscreenMode(EWindowMode::Windowed);
+    }
+    else
+    {
+        WindowedSize = Viewport->GetSizeXY();
+        Settings->SetScreenResolution(Desktop);
+        Settings->SetFullscreenMode(EWindowMode::WindowedFullscreen);
+    }
+    Settings->ApplyResolutionSettings(false);
+    Settings->ConfirmVideoMode();
+    Settings->SaveSettings();
     Notify(bFullscreen ? TEXT("Windowed") : TEXT("Fullscreen at desktop resolution"));
 }
 
@@ -1075,12 +1377,15 @@ void AMudOperator::SetupPlayerInputComponent(UInputComponent* Input)
     Super::SetupPlayerInputComponent(Input);
     Input->BindAxis(TEXT("Throttle"), this, &AMudOperator::SetThrottle);
     Input->BindAxis(TEXT("Steering"), this, &AMudOperator::SetSteering);
+    Input->BindAxis(TEXT("FootForward"), this, &AMudOperator::SetFootPadForward);
     Input->BindAxis(TEXT("LookX"), this, &AMudOperator::MoveMouseX);
     Input->BindAxis(TEXT("LookY"), this, &AMudOperator::MoveMouseY);
     Input->BindAxis(TEXT("PadX"), this, &AMudOperator::MovePadX);
     Input->BindAxis(TEXT("PadY"), this, &AMudOperator::MovePadY);
     Input->BindAxis(TEXT("HydraulicA"), this, &AMudOperator::SetHydraulicA);
     Input->BindAxis(TEXT("HydraulicB"), this, &AMudOperator::SetHydraulicB);
+    Input->BindAxis(TEXT("HydraulicKeyA"), this, &AMudOperator::SetHydraulicKeyA);
+    Input->BindAxis(TEXT("HydraulicKeyB"), this, &AMudOperator::SetHydraulicKeyB);
     Input->BindAction(TEXT("ToolUpTap"), IE_Pressed, this, &AMudOperator::ToolUpTap).bConsumeInput = false;
     Input->BindAction(TEXT("ToolDownTap"), IE_Pressed, this, &AMudOperator::ToolDownTap).bConsumeInput = false;
     Input->BindAction(TEXT("ToolLeftTap"), IE_Pressed, this, &AMudOperator::ToolLeftTap).bConsumeInput = false;
@@ -1093,8 +1398,12 @@ void AMudOperator::SetupPlayerInputComponent(UInputComponent* Input)
     Input->BindAction(TEXT("Help"), IE_Pressed, this, &AMudOperator::SwitchHelp);
     Input->BindAction(TEXT("PadHydraulics"), IE_Pressed, this, &AMudOperator::PadHydraulicsOn);
     Input->BindAction(TEXT("PadHydraulics"), IE_Released, this, &AMudOperator::PadHydraulicsOff);
+    Input->BindAction(TEXT("PadSecondHydraulics"), IE_Pressed, this, &AMudOperator::PadSecondHydraulicsOn);
+    Input->BindAction(TEXT("PadSecondHydraulics"), IE_Released, this, &AMudOperator::PadSecondHydraulicsOff);
     Input->BindAction(TEXT("Brake"), IE_Pressed, this, &AMudOperator::BrakeOn);
     Input->BindAction(TEXT("Brake"), IE_Released, this, &AMudOperator::BrakeOff);
+    Input->BindAction(TEXT("Sprint"), IE_Pressed, this, &AMudOperator::SprintOn);
+    Input->BindAction(TEXT("Sprint"), IE_Released, this, &AMudOperator::SprintOff);
     Input->BindAction(TEXT("Cruise"), IE_Pressed, this, &AMudOperator::CruiseToggle);
     Input->BindAction(TEXT("CruiseUp"), IE_Pressed, this, &AMudOperator::CruiseUp);
     Input->BindAction(TEXT("CruiseDown"), IE_Pressed, this, &AMudOperator::CruiseDown);
@@ -1144,8 +1453,18 @@ void AMudHUD::DrawHUD()
         Label(Operator->MissionText(), Text, 38, 61);
         Label(Operator->SurveyText(), Muted, 38, 81, 0.90);
     }
-    if (!Machine || !Terrain)
+    if (!Terrain)
         return;
+    if (!Machine)
+    {
+        if (Operator->bShowHelp)
+        {
+            Rect(Panel, W - 350, H - 77, 328, 55);
+            Label(TEXT("WASD  Move   Shift  Sprint   Space  Jump"), Text, W - 336, H - 67, 0.91);
+            Label(TEXT("E  Enter   Tab  Switch vehicle   Wheel  Zoom"), Muted, W - 336, H - 45, 0.91);
+        }
+        return;
+    }
 
     const auto Status = Operator->StatusText();
     if (bInCab && !Operator->bShowMap)
@@ -1162,7 +1481,7 @@ void AMudHUD::DrawHUD()
         Label(Machine->ToolDescription(), Machine->IsMovingEarth() ? Gold : Muted, 35, H - 58, 0.94);
         if (Operator->bShowHelp)
         {
-            Label(ArrowHelp(Machine->Kind), Muted, 35, H - 39, 0.85);
+            Label(ArrowHelp(*Machine), Muted, 35, H - 39, 0.85);
         }
         if (!Status.IsEmpty())
         {
@@ -1175,7 +1494,7 @@ void AMudHUD::DrawHUD()
     Rect(Panel, 22, H - 154, 322, 132);
     Label(Machine->Name(), Text, 38, H - 143, 1.24);
     Label(Machine->ToolDescription(), Machine->IsMovingEarth() ? Gold : Muted, 38, H - 119);
-    Label(ArrowHelp(Machine->Kind), Text, 38, H - 99, 0.91);
+    Label(ArrowHelp(*Machine), Text, 38, H - 99, 0.91);
     Label(FString::Printf(TEXT("%02.0f km/h   |   %02.0f%% grip   |   %4.1f t payload"),
         FMath::Abs(Machine->Speed) * 3.6, Machine->Grip * 100, Machine->Cargo.Mass()), Text, 38, H - 76);
     Rect(FLinearColor(0.13, 0.19, 0.17), 38, H - 48, 138, 6);
@@ -1210,15 +1529,15 @@ void AMudHUD::DrawHUD()
     if (Operator->bShowHelp)
     {
         Rect(Panel, W - 368, H - 156, 346, 134);
-        Label(TEXT("WASD  Drive     E  Enter / exit     Tab  Vehicle"), Text, W - 353, H - 143);
-        const TCHAR* WorkHelp = Machine->Kind == EMudMachine::Excavator ? TEXT("V  Dig    I  Tip    J/K/N/M  Hydraulics") :
+        Label(TEXT("WASD  Drive    E  Enter / exit    Tab  Next vehicle"), Text, W - 353, H - 143);
+        const TCHAR* WorkHelp = Machine->Kind == EMudMachine::Excavator ? TEXT("V  Dig    I  Tip    Both mouse buttons: tilt") :
             (Machine->Kind == EMudMachine::Dozer ? TEXT("I  Spread    J/K  Blade") :
                 (Machine->Kind == EMudMachine::Loader ? TEXT("Lower bucket and drive into the pile") : TEXT("R  Load at a pile    I  Auto tip")));
         Label(WorkHelp, Text, W - 353, H - 122);
         const TCHAR* MouseHelp = Machine->Kind == EMudMachine::Excavator ?
-            TEXT("Hold LMB  Boom / stick    RMB  Curl / swing") :
+            TEXT("Hold LMB  Boom / swing    RMB  Stick / bucket") :
             (Machine->Kind == EMudMachine::Dozer ? TEXT("Hold mouse + drag up / down  Blade") :
-                (Machine->Kind == EMudMachine::Loader ? TEXT("Hold LMB  Lift    RMB  Bucket tilt") : TEXT("Mouse  Look around")));
+                (Machine->Kind == EMudMachine::Loader ? TEXT("LMB up/down  Lift    LMB left/right or RMB up/down  Bucket") : TEXT("Mouse  Look around")));
         Label(MouseHelp, Text, W - 353, H - 101);
         Label(TEXT("C  Camera     9  Survey     Backspace  Recover"), Text, W - 353, H - 80);
         Label(TEXT("F5 / F9  Save / load    F7 / F8  Graphics"), Text, W - 353, H - 59);

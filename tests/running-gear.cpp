@@ -25,6 +25,30 @@ int main()
     assert(SteeringDegrees(30, 4.16, -1.22) < 30);
     Near(SteeringDegrees(-30, 4.16, -1.22), -SteeringDegrees(30, 4.16, 1.22));
 
+    constexpr double FrontToJoint = 1.21, JointToBogie = 2.145;
+    const auto StraightHauler = MoveArticulated(0.4, FrontToJoint, JointToBogie, 0, 0);
+    Near(StraightHauler.FrontYaw, 0);
+    Near(StraightHauler.RearYaw, 0);
+    Near(StraightHauler.RearTravel, 0.4);
+    const auto SteeringInPlace = MoveArticulated(0, FrontToJoint, JointToBogie, 0, 0.25);
+    assert(SteeringInPlace.FrontYaw > -SteeringInPlace.RearYaw);
+    assert(SteeringInPlace.RearYaw < 0);
+    Near(SteeringInPlace.FrontYaw - SteeringInPlace.RearYaw, 0.25);
+    const auto DrivingTurn = MoveArticulated(0.4, FrontToJoint, JointToBogie, 0.35, 0.35);
+    const auto BackingTurn = MoveArticulated(-0.4, FrontToJoint, JointToBogie, 0.35, 0.35);
+    assert(DrivingTurn.FrontYaw > 0);
+    Near(DrivingTurn.FrontYaw, DrivingTurn.RearYaw);
+    Near(BackingTurn.FrontYaw, -DrivingTurn.FrontYaw);
+    Near(BackingTurn.RearTravel, -DrivingTurn.RearTravel);
+
+    constexpr double LoaderAxleToJoint = 1.65;
+    const auto LoaderSteer = MoveArticulated(0, LoaderAxleToJoint, LoaderAxleToJoint, 0, 0.02);
+    assert(LoaderSteer.FrontYaw > 0 && LoaderSteer.RearYaw < 0);
+    Near(LoaderSteer.FrontYaw, -LoaderSteer.RearYaw, 1e-6);
+    const auto LoaderTurn = MoveArticulated(0.4, LoaderAxleToJoint, LoaderAxleToJoint, 0.4, 0.4);
+    Near(LoaderTurn.FrontYaw, LoaderTurn.RearYaw);
+    Near(LoaderTurn.RearTravel, 0.4);
+
     constexpr TrackPath Belt{1.70, 0.47};
     constexpr double Straight = 2 * Belt.HalfStraight;
     constexpr double Arc = Pi * Belt.Radius;
@@ -47,6 +71,11 @@ int main()
     }
 
     const auto StraightPress = PressGround(0, 1, 1, 0.25, 0, true);
+    Near(ContactSink(1, 0.1, 1, false), 0);
+    Near(ContactSink(0, 1.0, 1, false), 0);
+    assert(ContactSink(1, 1.0, 1, false) > ContactSink(1, 1.0, 0, false) * 2);
+    assert(ContactSink(1, 0.95, 1, true) < ContactSink(1, 0.95, 1, false));
+    assert(PressGround(0, 1, 1, 0.95, 0.6, false, 1.5).Depth > PressGround(0, 1, 1, 0.95, 0, false).Depth * 2);
     const auto TurningPress = PressGround(0, 1, 1, 0.25, 1, true);
     const auto MudPress = PressGround(0, 1, 1, 0.95, 1, true);
     assert(TurningPress.Depth > StraightPress.Depth * 2);

@@ -58,7 +58,7 @@ Invoke-BuildStep -Executable $build -Arguments @(
 )
 $bootstrap = Join-Path $PSScriptRoot 'bootstrap-unreal.py'
 Invoke-BuildStep -Executable $editor -Arguments @(
-    $project, '-run=pythonscript', "-script=$bootstrap", '-unattended', '-nop4', '-NullRHI', '-stdout', '-FullStdOutLogOutput'
+    $project, "-ExecutePythonScript=$bootstrap", '-unattended', '-nop4', '-NullRHI', '-stdout', '-FullStdOutLogOutput'
 )
 if (-not (Test-Path -LiteralPath (Join-Path $projectRoot 'Content/Generated/Valley.umap') -PathType Leaf)) {
     throw "Unreal did not generate the Valley map. See the Unreal script log."

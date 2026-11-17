@@ -36,22 +36,29 @@ public:
     AMudTerrain();
     bool Initialize();
     double Height(FVector2D XY) const;
+    double MeshHeight(FVector2D XY, FVector* SurfaceNormal = nullptr) const;
     FVector Normal(FVector2D XY) const;
     double Wetness(FVector2D XY) const;
     double WaterDepth(FVector2D XY) const;
+    FVector RiverSoundPoint(double Y) const;
     double Grip(FVector2D XY) const;
+    double ContactSink(FVector2D XY, bool bTracked, double LoadFraction) const;
     Earthwork::Material Surface(FVector2D XY) const;
     Earthwork::Load Excavate(FVector2D XY, double Radius, double Amount, double ToolHeight);
     Earthwork::Load CutPass(FVector2D XY, FVector2D Across, FVector2D Reach, double Amount, double ToolHeight,
-        double CrossSlope = 0);
+        FVector2D Slopes = FVector2D::ZeroVector, bool bBladePass = false);
     Earthwork::Load DrawFromPile(const FMudPile& Pile, FVector2D Approach, double Amount);
     void Deposit(FVector2D XY, double Radius, const Earthwork::Load& Load);
+    void Pour(FVector Origin, FVector Direction, double Radius, const Earthwork::Load& Load);
+    void AdvancePours(double Dt);
+    void SettlePours();
+    void Spread(FVector2D XY, FVector2D Across, FVector2D Reach, const Earthwork::Load& Load);
     void PressTrack(FVector2D Center, FVector2D Forward, double HalfLength, double HalfWidth,
-        double Outward, double Scrub, bool bTracked);
+        double Outward, double Scrub, bool bTracked, double LoadFactor = 1);
     void ShowSpill(FVector Origin, double Volume, Earthwork::Material Type,
-        FVector Direction = FVector::ZeroVector, double FloorZ = -BIG_NUMBER);
+        FVector Direction = FVector::ZeroVector, double FloorZ = -BIG_NUMBER, double ThrowScale = 1.0);
     void UpdateSpills(double Dt);
-    double Grade(FVector2D XY, FVector2D Across, FVector2D Reach, double Rate);
+    double Grade(FVector2D XY, FVector2D Across, FVector2D Reach, double Rate, double ToolHeight, FVector2D Slopes);
     void UpdateTiles(FVector2D Focus);
     bool HitsTree(FVector2D XY, double Radius, bool bClear);
     double Remaining(const FMudPile& Pile) const;
@@ -69,6 +76,7 @@ public:
 private:
     static constexpr int32 TileSize = 64;
     static constexpr int32 CrownTiers = 3;
+    static constexpr int32 RubbleRadius = 36;
     struct FTree
     {
         FVector2D XY;
@@ -92,6 +100,7 @@ private:
         double Spin = 0;
         double FloorZ = -BIG_NUMBER;
         bool bBounced = false;
+        bool bRolling = false;
     };
     struct FSpillBatch
     {
@@ -99,6 +108,13 @@ private:
         TArray<FTransform> Transforms;
         int32 Next = 0;
         double Credit = 0;
+    };
+    struct FPour
+    {
+        FVector Position;
+        FVector Velocity;
+        double Radius;
+        Earthwork::Load Mass;
     };
 
     int32 Samples = 0;
@@ -120,13 +136,18 @@ private:
     TSet<int32> DirtyPlants;
     TArray<int32> TileSteps;
     FSpillBatch Spills[Earthwork::MaterialCount];
+    TArray<FPour> Pours;
     FRandomStream SpillRandom{66};
+    FVector2D RubbleFocus{-10000, -10000};
+    double NextRubbleUpdate = 0;
+    bool bRubbleDirty = true;
     UPROPERTY() TArray<TObjectPtr<UProceduralMeshComponent>> TerrainMeshes;
     UPROPERTY() TObjectPtr<UMaterialInterface> GroundMaterial;
     UPROPERTY() TObjectPtr<UHierarchicalInstancedStaticMeshComponent> Trunks;
     UPROPERTY() TObjectPtr<UHierarchicalInstancedStaticMeshComponent> Crowns;
     UPROPERTY() TObjectPtr<UHierarchicalInstancedStaticMeshComponent> Meadow;
     UPROPERTY() TArray<TObjectPtr<UInstancedStaticMeshComponent>> Spoil;
+    UPROPERTY() TArray<TObjectPtr<UInstancedStaticMeshComponent>> GroundRubble;
     UPROPERTY() TObjectPtr<UTexture2D> Overview;
 
     int32 Index(int32 X, int32 Y) const { return Y * Samples + X; }
@@ -136,11 +157,14 @@ private:
     void UpdateCell(int32 Cell, double WorkDelta = 0);
     void DirtyCell(int32 Cell);
     TArray<int32> Cells(FVector2D XY, double Radius) const;
-    TArray<TPair<int32, double>> ToolFootprint(FVector2D XY, FVector2D Across, FVector2D Reach) const;
+    TArray<TPair<int32, double>> ToolFootprint(FVector2D XY, FVector2D Across, FVector2D Reach, bool bBladePass) const;
+    void ApplyFill(const TArray<TPair<int32, double>>& Area, const Earthwork::Load& Load);
+    void LandPour(FVector2D Contact, FPour& Pour);
     FRiverSample RiverAt(double Y) const;
     void BuildTile(int32 Id, int32 Step);
     void BuildGroundCover();
     void UpdateGroundCover();
+    void UpdateGroundRubble(FVector2D Focus);
     void BuildWater();
     void BuildMarkers();
     void HideTree(int32 Id);

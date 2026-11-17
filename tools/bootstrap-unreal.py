@@ -8,6 +8,8 @@ import unreal
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from unreal_materials import ASSETS, FOLDER, build_materials
 from unreal_foliage import build_foliage, build_spoil
+from unreal_worker import build_worker
+from unreal_audio import build_audio
 
 
 def make_map():
@@ -29,29 +31,29 @@ def make_map():
             raise RuntimeError(f"Could not spawn {actor}")
         return result
 
-    angle = unreal.Rotator(pitch=-31, yaw=-48, roll=0)
+    angle = unreal.Rotator(pitch=-38, yaw=-63, roll=0)
     sun = ensure_actor(unreal.DirectionalLight, (0, 0, 200), angle)
     sun.set_actor_rotation(angle, False)
     sun_light = sun.get_component_by_class(unreal.DirectionalLightComponent)
     sun_light.set_mobility(unreal.ComponentMobility.MOVABLE)
-    sun_light.set_editor_property("intensity", 4.2)
-    sun_light.set_light_color(unreal.LinearColor(1.0, 0.97, 0.92))
+    sun_light.set_editor_property("intensity", 4.05)
+    sun_light.set_light_color(unreal.LinearColor(1.0, 0.975, 0.925))
     sun_light.set_editor_property("atmosphere_sun_light", True)
     sun_light.set_editor_property("dynamic_shadow_distance_movable_light", 19000)
-    sun_light.set_editor_property("light_source_angle", 1.65)
+    sun_light.set_editor_property("light_source_angle", 1.35)
 
     sky = ensure_actor(unreal.SkyLight, (0, 0, 100))
     sky_light = sky.get_component_by_class(unreal.SkyLightComponent)
     sky_light.set_mobility(unreal.ComponentMobility.MOVABLE)
     sky_light.set_editor_property("real_time_capture", True)
-    sky_light.set_editor_property("intensity", 1.05)
+    sky_light.set_editor_property("intensity", 1.23)
     ensure_actor(unreal.SkyAtmosphere, (0, 0, 0))
 
     haze = ensure_actor(unreal.ExponentialHeightFog, (0, 0, 1300))
     fog = haze.get_component_by_class(unreal.ExponentialHeightFogComponent)
-    fog.set_editor_property("fog_density", 0.013)
-    fog.set_editor_property("fog_height_falloff", 0.24)
-    fog.set_editor_property("start_distance", 1800)
+    fog.set_editor_property("fog_density", 0.0095)
+    fog.set_editor_property("fog_height_falloff", 0.28)
+    fog.set_editor_property("start_distance", 2700)
     fog.set_volumetric_fog(False)
     ensure_actor(unreal.PlayerStart, (11500, 79500, 2070))
     if not levels.save_current_level():
@@ -65,8 +67,11 @@ def main():
     build_materials(asset_tools)
     build_foliage(asset_tools)
     build_spoil(asset_tools)
+    build_worker(asset_tools)
+    build_audio(asset_tools)
     make_map()
     unreal.log("Mud valley assets generated.")
 
 
-main()
+if __name__ == "__main__":
+    main()

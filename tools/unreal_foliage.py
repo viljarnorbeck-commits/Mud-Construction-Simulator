@@ -22,9 +22,9 @@ def pine_canopy():
         lean_x, lean_y = tier * 5.8, tier * -2.3
         for spoke in range(spokes):
             angle = math.tau * (spoke / spokes + tier * 0.113)
-            reach = radius * (0.70 + 0.20 * (spoke % 2) + randomizer.uniform(0, 0.19))
+            reach = radius * (0.63 + 0.24 * (spoke % 2) + randomizer.uniform(0, 0.24))
             vertices.append((lean_x + reach * math.cos(angle), lean_y + reach * math.sin(angle),
-                             height + randomizer.uniform(-22, 18)))
+                             height + randomizer.uniform(-29, 18) - (spoke % 2) * 14))
         for spoke in range(spokes):
             angle = math.tau * (spoke / spokes + tier * 0.113)
             vertices.append((lean_x + radius * 0.53 * math.cos(angle), lean_y + radius * 0.53 * math.sin(angle),
@@ -42,16 +42,18 @@ def pine_canopy():
 
 def meadow_tuft():
     vertices, faces = [], []
-    for blade in range(8):
-        angle = blade * 2.4
+    rng = random.Random(619)
+    for blade in range(12):
+        angle = blade * 2.4 + rng.uniform(-0.22, 0.22)
         direction = (math.cos(angle), math.sin(angle))
-        reach = 5 + blade % 4 * 5
+        reach = rng.uniform(3, 26)
         x, y = direction[0] * reach, direction[1] * reach
         across = (-direction[1], direction[0])
-        height = 21 + (blade * 7 % 24)
+        height = rng.uniform(18, 46)
+        blade_width = rng.uniform(1.65, 3.1)
         start = len(vertices)
-        for fraction, width in ((0, 3.9), (0.60, 2.8)):
-            lean = fraction * height * 0.33
+        for fraction, width in ((0, blade_width), (0.56, blade_width * 0.70)):
+            lean = fraction * height * 0.30
             for side in (-1, 1):
                 vertices.append((x + direction[0] * lean + across[0] * width * side,
                                  y + direction[1] * lean + across[1] * width * side, fraction * height))
