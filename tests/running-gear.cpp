@@ -45,4 +45,17 @@ int main()
         Near(std::hypot(After.Ahead - Before.Ahead, After.Height - Before.Height), 2 * Step);
         Near(std::remainder(After.Pitch - Before.Pitch, 360), 0, 0.001);
     }
+
+    const auto StraightPress = PressGround(0, 1, 1, 0.25, 0, true);
+    const auto TurningPress = PressGround(0, 1, 1, 0.25, 1, true);
+    const auto MudPress = PressGround(0, 1, 1, 0.95, 1, true);
+    assert(TurningPress.Depth > StraightPress.Depth * 2);
+    assert(MudPress.Depth > TurningPress.Depth);
+    assert(PressGround(0, 1, 1, 0.25, 0, false).Depth < StraightPress.Depth);
+    Near(PressGround(0, 1, 0, 0.95, 1, true).Depth, 0);
+    Near(PressGround(0, 0, 1, 0.95, 1, true).Depth, 0);
+    assert(PressGround(150, 1, 1, 0.95, 0, true).Wear == 150);
+    assert(PressGround(150, 1, 1, 0.95, 1, true).Wear > 150);
+    assert(PressGround(255, 1, 1, 0.95, 1, true).Wear == 255);
+    Near(PressGround(255, 1, 1, 0.95, 1, true).Depth, 0);
 }

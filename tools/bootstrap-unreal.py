@@ -7,6 +7,7 @@ import unreal
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from unreal_materials import ASSETS, FOLDER, build_materials
+from unreal_foliage import build_foliage, build_spoil
 
 
 def make_map():
@@ -60,7 +61,10 @@ def make_map():
 def main():
     unreal.SystemLibrary.execute_console_command(None, "Interchange.FeatureFlags.Import.SyncToBrowser 0")
     ASSETS.make_directory(FOLDER)
-    build_materials(unreal.AssetToolsHelpers.get_asset_tools())
+    asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
+    build_materials(asset_tools)
+    build_foliage(asset_tools)
+    build_spoil(asset_tools)
     make_map()
     unreal.log("Mud valley assets generated.")
 

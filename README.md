@@ -42,7 +42,7 @@ Skriptet kontrollerar filens hash, Windows-signaturen och det förväntade certi
 
 ## Spela
 
-1. Ett nytt spel börjar i grävaren. Stå still och tryck **V** för att sänka skopan, ta ett grävtag och lyfta lasset. Den gröna markören visar var material flyttas. Tryck **I** för att tippa där skopan är. **Tab** byter fordon.
+1. Ett nytt spel börjar i grävaren. Stå still och tryck **V** för att sträcka ut armen, dra skopan genom jorden och lyfta lasset. Den gröna markören visar var material flyttas. Tryck **I** för att tippa från den lyfta skopan. **Tab** byter fordon.
 2. För att lasta dumpern med grävaren, parkera flaket inom räckhåll och sväng den lyfta skopan över flaket innan du trycker **I**. Med **J/K/N/M** tar du över hydrauliken. **G** växlar mellan bom/sticka och skopa/sväng. Vid en materialdepå kan **R** lasta dumpern direkt.
 3. Öppna kartan med **9** och välj ett av de ljusblå vadställena. Backa dit med dumpern och tippa med **I**. Sänk bulldozerns blad med **V** och kör framåt för att schakta. **I** sprider jorden som bladet har samlat upp och höjer bladet när lasset är slut. Växla till utjämning med **G**, sänk bladet igen och kör över fyllningen. Ett sänkt blad röjer också träd.
 4. Lasta terränglastbilen och passera den gula startportalen. Kör till den röda målportalen med minst 18 m³ kvar på flaket.
@@ -52,20 +52,40 @@ Skriptet kontrollerar filens hash, Windows-signaturen och det förväntade certi
 | Kör och styr | WASD | LT/RT och vänster spak |
 | Kliv i eller ur, byt fordon | E, Tab | Y, styrkors höger |
 | Kamera | Mus, C, scrollhjul | Höger spak, tryck på höger spak för kamerabyte |
-| Hydraulik | J/K, N/M eller håll höger musknapp och dra | Håll LB och använd höger spak |
+| Hydraulik | Piltangenter, J/K/N/M eller håll in en musknapp och dra | Håll LB och använd höger spak |
 | Verktyg och funktionsgrupp | V, G | X, RB |
 | Tippa, lasta vid depå | I, R | B, styrkors upp |
 | Broms, återställ fordon | Mellanslag, Backsteg | A, styrkors ned |
 | Karta | 9 | Visa-knappen |
 | Spara och läs in | F5, F9 | |
 
-Bulldozerns **G** växlar mellan schaktning och utjämning. På grävaren växlar knappen mellan bom/sticka och skopa/sväng. Kontrollerna kan redigeras i `Config/DefaultInput.ini` före ompaketering.
+| Maskin | Upp / ned | Vänster / höger |
+|---|---|---|
+| Volvo L120H hjullastare | Höj / sänk lastararmen | Vinkla skopan bakåt / tippa framåt |
+| Schaktmaskin | Höj / sänk bladet | |
+| Dumper och lastbil | Höj / sänk flaket | |
+| Grävmaskin | Höj / sänk bommen | Dra in / sträck ut stickan |
+| Grävmaskin med skopa/sväng vald med **G** | Slut / öppna skopan | Sväng vänster / höger |
+
+Hjullastaren lastar när du sänker skäret och kör in i en hög. Vinkla skopan bakåt för transport. Lyft och tippa den framåt över marken eller ett flak för att tömma den. Flaket på dumpern och lastbilen håller sin vinkel när du släpper piltangenten. **I** startar automatisk tippning.
+
+Sänk schaktbladet med **↓** eller slå på markföljning med **V**, och kör sedan framåt med **W**. **G** växlar mellan schaktning och utjämning. Tryck **I** för att lägga ut materialet som ligger framför bladet. Om bladet blir fullt vid fortsatt schaktning lägger maskinen överskottet till höger.
+
+För att gräva manuellt, sätt grävarens tänder mot marken med bom och sticka, byt till skopa/sväng med **G** och slut skopan med **uppåtpilen** eller **J**. Kontrollerna kan redigeras i `Config/DefaultInput.ini` före ompaketering.
 
 Med **C** växlar du mellan hytten och kameran utanför maskinen. Instrumentet i hytten visar fart, färdriktning och last. På grävaren och bulldozern visar arbetsinstrumentet skärets höjd mot marken. Ett negativt värde betyder att skäret ligger under markytan.
 
+På grävaren styr **vänster musknapp** bommen upp och ner och stickan in och ut. Med **höger musknapp** sluter du skopan genom att dra uppåt, öppnar den genom att dra nedåt och svänger överdelen genom att dra åt sidan. Håll **båda knapparna** för att styra bom och sväng samtidigt. På hjullastaren styr vänster musknapp lastararmens höjd och höger musknapp skopans lutning när du drar uppåt eller nedåt. På schaktmaskinen styr valfri musknapp bladets höjd.
+
 ## Testa 4K och 120 fps
 
-Ställ Windows-skrivbordet på 3 840 × 2 160 och minst 120 Hz. Växla till kantlös helskärm med **F6**. **F7** väljer 67 % intern upplösning med TSR och **F8** väljer 100 %. Båda profilerna har ett tak på 120 fps. Starta samma paketerade version med argumentet `-MudBenchmark` för att mäta 30 sekunder under upprepad tippning vid det södra vadet. Ramtiderna skrivs till `Saved/Benchmark.csv`. Jämför snitt och 99:e percentilen på samma dator med samma upplösning. För 120 fps motsvarar rambudgeten 8,33 ms.
+Standardprofilen sätter ett tak på 120 fps med TSR från 50 % intern upplösning och behåller högsta texturkvaliteten. För att testa med en bestämd bildyta, ange till exempel `-Fullscreen -ResX=3840 -ResY=2160 -ForceRes` på en 4K-skärm med minst 120 Hz. Startargumentet `-MudHighResolution` väljer i stället skrivbordets upplösning med 100 % intern renderingsskala.
+
+**F6** växlar mellan fönster och helskärm. **F7** väljer en profil med 67 % intern upplösning och lägre detaljinställningar. **F8** väljer 100 % intern upplösning med högsta texturkvalitet och 16× anisotropisk filtrering.
+
+Lägg till `-MudBenchmark` vid start för att mäta 30 sekunder under upprepad tippning vid det södra vadet. Ramtiderna skrivs till `Saved/Benchmark.csv`. Jämför snitt och 99:e percentilen på samma dator med samma upplösning. För 120 fps motsvarar rambudgeten 8,33 ms.
+
+På RTX 4070 Laptop gav standardprofilen med det aktuella vattenmaterialet 119,6 fps i snitt vid 3 200 × 2 000 och 9,20 ms vid 99:e percentilen. Före vattenuppdateringen gav en 4K-bildyta i fönster på samma dator 114,1 fps med 50 % intern upplösning och 119,0 fps med 44 %. Upprepa 4K-testet med `-Windowed -ResX=3840 -ResY=2160 -ForceRes -MudBenchmark -ExecCmds="sg.ResolutionQuality 44"`.
 
 Fristående test av massbalans, last och bärighet kan köras med en C++17-kompilator.
 

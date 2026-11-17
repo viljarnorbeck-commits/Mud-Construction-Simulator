@@ -11,6 +11,46 @@ static void Near(double Actual, double Expected)
 
 int main()
 {
+    HydraulicInput Left;
+    AccumulateMouseDrag(Left, true, false, MouseTool::Excavator, 0.6, -0.4);
+    Near(Left.Boom, -0.4);
+    Near(Left.Stick, 0.6);
+    Near(Left.Curl, 0);
+    Near(Left.Swing, 0);
+
+    HydraulicInput Right;
+    AccumulateMouseDrag(Right, false, true, MouseTool::Excavator, -0.3, 0.7);
+    Near(Right.Boom, 0);
+    Near(Right.Stick, 0);
+    Near(Right.Curl, 0.7);
+    Near(Right.Swing, -0.3);
+
+    HydraulicInput Both;
+    AccumulateMouseDrag(Both, true, true, MouseTool::Excavator, 0.4, -0.25);
+    AccumulateMouseDrag(Both, false, false, MouseTool::Excavator, 1.0, 1.0);
+    Near(Both.Boom, -0.25);
+    Near(Both.Stick, 0);
+    Near(Both.Curl, 0);
+    Near(Both.Swing, 0.4);
+
+    HydraulicInput Blade;
+    AccumulateMouseDrag(Blade, true, false, MouseTool::Blade, 1.0, -0.5);
+    AccumulateMouseDrag(Blade, false, true, MouseTool::Blade, 1.0, 0.2);
+    Near(Blade.Boom, -0.3);
+    Near(Blade.Stick, 0);
+    Near(Blade.Curl, 0);
+    Near(Blade.Swing, 0);
+
+    HydraulicInput Loader;
+    AccumulateMouseDrag(Loader, true, false, MouseTool::Loader, 0.8, 0.6);
+    Near(Loader.Boom, 0.6);
+    Near(Loader.Curl, 0);
+    AccumulateMouseDrag(Loader, false, true, MouseTool::Loader, -0.7, -0.5);
+    Near(Loader.Boom, 0.6);
+    Near(Loader.Curl, -0.5);
+    Near(Loader.Stick, 0);
+    Near(Loader.Swing, 0);
+
     constexpr double Frame = 1.0 / 60.0;
     const double Moving = Approach(0, 2, 4, Frame, 0.2);
     Near(Moving, 4 * Frame);
@@ -37,4 +77,36 @@ int main()
     assert(Rate > 0);
     assert(HydraulicTravel(Rate, -29, 0.2, 0.10) < 0);
     assert(Rate < 0);
+
+    TipControl Bed;
+    auto OperateBed = [&](double Input, bool Automatic, int Frames)
+    {
+        for (int Index = 0; Index < Frames; ++Index)
+            Bed.Step(Input, Automatic, Frame);
+    };
+    OperateBed(1, false, 54);
+    assert(Bed.Angle > 25 && Bed.CanSpill(false));
+    OperateBed(0, false, 120);
+    Near(Bed.Angle, 36);
+    OperateBed(-1, false, 30);
+    assert(Bed.Angle < 25 && !Bed.CanSpill(false));
+    OperateBed(-1, false, 120);
+    Near(Bed.Angle, 0);
+    Bed.Manual = false;
+    OperateBed(0, true, 120);
+    assert(Bed.Angle > 50 && Bed.CanSpill(true));
+    OperateBed(0, false, 120);
+    Near(Bed.Angle, 0);
+
+    DirectionalTap Tap;
+    Tap.Press(true);
+    Near(Tap.Resolve(0, Frame), 1);
+    Near(Tap.Resolve(-0.5, Frame), -0.5);
+    for (int Index = 0; Index < 5; ++Index)
+        Tap.Resolve(0, Frame);
+    Near(Tap.Resolve(0, Frame), 0);
+    Tap.Press(false);
+    Near(Tap.Resolve(0, Frame), -1);
+    Tap.Press(true);
+    Near(Tap.Resolve(0, Frame), 0);
 }

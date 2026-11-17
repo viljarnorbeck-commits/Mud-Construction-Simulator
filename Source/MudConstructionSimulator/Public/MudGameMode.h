@@ -4,6 +4,7 @@
 #include "GameFramework/GameModeBase.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/HUD.h"
+#include "MachineMotion.h"
 #include "MudGameMode.generated.h"
 
 class AMudTerrain;
@@ -54,11 +55,11 @@ private:
     double Steering = 0;
     double HydraulicA = 0;
     double HydraulicB = 0;
-    double MouseHydraulicA = 0;
-    double MouseHydraulicB = 0;
+    MachineMotion::DirectionalTap VerticalTap;
+    MachineMotion::DirectionalTap HorizontalTap;
+    MachineMotion::HydraulicInput MouseHydraulics;
     double PadHydraulicA = 0;
     double PadHydraulicB = 0;
-    bool bMouseHydraulics = false;
     bool bPadHydraulics = false;
     bool bCab = false;
     bool bBrake = false;
@@ -74,15 +75,20 @@ private:
     double BenchmarkLast = 0;
     TArray<double> BenchmarkFrames;
 
-    void Step(double Dt, const FVector2D& Hydraulics);
+    void Step(double Dt, const FVector2D& Hydraulics, const MachineMotion::HydraulicInput& Mouse);
     void UpdateCamera();
     void UpdateBenchmark();
     void SetThrottle(float Value) { Throttle = FMath::Clamp(Value, -1.f, 1.f); }
     void SetSteering(float Value) { Steering = FMath::Clamp(Value, -1.f, 1.f); }
     void SetHydraulicA(float Value) { HydraulicA = Value; }
     void SetHydraulicB(float Value) { HydraulicB = Value; }
+    void ToolUpTap() { VerticalTap.Press(true); }
+    void ToolDownTap() { VerticalTap.Press(false); }
+    void ToolRightTap() { HorizontalTap.Press(true); }
+    void ToolLeftTap() { HorizontalTap.Press(false); }
     void MoveMouseX(float Value);
     void MoveMouseY(float Value);
+    bool ApplyMouseDrag(double X, double Y);
     void MovePadX(float Value);
     void MovePadY(float Value);
     void PanView(double Yaw, double Pitch);
@@ -92,8 +98,6 @@ private:
     void SwitchCamera();
     void SwitchMap() { bShowMap = !bShowMap; }
     void SwitchHelp() { bShowHelp = !bShowHelp; }
-    void MouseHydraulicsOn() { bMouseHydraulics = true; }
-    void MouseHydraulicsOff() { bMouseHydraulics = false; }
     void PadHydraulicsOn() { bPadHydraulics = true; }
     void PadHydraulicsOff() { bPadHydraulics = false; }
     void BrakeOn() { bBrake = true; bCruise = false; }
@@ -110,6 +114,7 @@ private:
     void Load();
     void PerformanceMode();
     void QualityMode();
+    void ApplyQualityMode(bool bUseDesktop);
     void ToggleFullscreen();
     void Quit();
     void Notify(const FString& Text);

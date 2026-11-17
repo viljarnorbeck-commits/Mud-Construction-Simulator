@@ -13,6 +13,7 @@
 #include "Misc/Paths.h"
 #include "ProceduralMeshComponent.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "RunningGear.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 
@@ -55,11 +56,20 @@ AMudTerrain::AMudTerrain()
     RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("TerrainRoot"));
     Trunks = CreateDefaultSubobject<UHierarchicalInstancedStaticMeshComponent>(TEXT("Trunks"));
     Crowns = CreateDefaultSubobject<UHierarchicalInstancedStaticMeshComponent>(TEXT("Crowns"));
-    Spoil = CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("FallingSpoil"));
-    Spoil->SetupAttachment(RootComponent);
-    Spoil->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-    Spoil->SetCastShadow(false);
-    Spoil->SetCullDistances(6500, 12500);
+    Meadow = CreateDefaultSubobject<UHierarchicalInstancedStaticMeshComponent>(TEXT("Meadow"));
+    Meadow->SetupAttachment(RootComponent);
+    Meadow->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    Meadow->SetCastShadow(false);
+    Meadow->SetCullDistances(4200, 7600);
+    for (const TCHAR* Name : {TEXT("FallingSoil"), TEXT("FallingGravel"), TEXT("FallingRock")})
+    {
+        auto* Pieces = CreateDefaultSubobject<UInstancedStaticMeshComponent>(FName(Name));
+        Pieces->SetupAttachment(RootComponent);
+        Pieces->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+        Pieces->SetCastShadow(false);
+        Pieces->SetCullDistances(5500, 9500);
+        Spoil.Add(Pieces);
+    }
     for (auto* Instances : { Trunks.Get(), Crowns.Get() })
     {
         Instances->SetupAttachment(RootComponent);
@@ -128,10 +138,13 @@ bool AMudTerrain::Initialize()
         return false;
 
     Trunks->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder")));
-    Crowns->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cone.Cone")));
+    auto* CanopyMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Generated/PineCanopy.PineCanopy"));
+    CrownInstancesPerTree = CanopyMesh ? 1 : CrownTiers;
+    Crowns->SetStaticMesh(CanopyMesh ? CanopyMesh : LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cone.Cone")));
     Trunks->SetMaterial(0, GeneratedMaterial(TEXT("Bark")));
     Crowns->SetMaterial(0, GeneratedMaterial(TEXT("Pine")));
     TArray<FTransform> TrunkTransforms, CrownTransforms;
+    FRandomStream TreeVariation(Seed ^ 0x50494e45);
     for (const auto& Value : Data->GetArrayField(TEXT("trees")))
     {
         const FJsonObject& Tree = *Value->AsObject();
@@ -139,29 +152,50 @@ bool AMudTerrain::Initialize()
         const double Scale = Tree.GetNumberField(TEXT("scale"));
         FTree Entry;
         Entry.XY = ReadXY(Tree);
-        Entry.Trunk = FTransform(FRotator::ZeroRotator, Position + FVector(0, 0, 190 * Scale),
-            FVector(0.45, 0.45, 3.8) * Scale);
+        const double TrunkWidth = TreeVariation.FRandRange(0.25, 0.44);
+        Entry.Trunk = FTransform(FRotator::ZeroRotator, Position + FVector(0, 0, 187 * Scale),
+            FVector(TrunkWidth, TrunkWidth, 3.74) * Scale);
         const double Bearing = FMath::Fmod(Entry.XY.X * 11 + Entry.XY.Y * 13, 360.0);
-        const FVector Lean = FRotator(0, Bearing, 0).Vector() * 36.0;
-        for (int32 Tier = 0; Tier < CrownTiers; ++Tier)
+        if (CanopyMesh)
         {
-            const double Height = 368 + Tier * 151;
-            const double Width = 4.05 - Tier * 0.93;
-            Entry.Crown[Tier] = FTransform(FRotator(3.5, Bearing + Tier * 39, -2.0),
-                Position + (FVector(0, 0, Height) + Lean * (0.2 + 0.38 * Tier)) * Scale,
-                FVector(Width, Width * 0.90, 3.63 - Tier * 0.44) * Scale);
-            CrownTransforms.Add(Entry.Crown[Tier]);
+            const double Width = TreeVariation.FRandRange(0.70, 1.21);
+            const double HeightScale = TreeVariation.FRandRange(0.78, 1.17);
+            Entry.Crown[0] = FTransform(FRotator(0, Bearing, 0), Position,
+                FVector(Width, Width * TreeVariation.FRandRange(0.85, 1.13), HeightScale) * Scale);
+            CrownTransforms.Add(Entry.Crown[0]);
+        }
+        else
+        {
+            const FVector Lean = FRotator(0, Bearing, 0).Vector() * 36.0;
+            for (int32 Tier = 0; Tier < CrownInstancesPerTree; ++Tier)
+            {
+                const double Height = 368 + Tier * 151;
+                const double Width = 4.05 - Tier * 0.93;
+                Entry.Crown[Tier] = FTransform(FRotator(3.5, Bearing + Tier * 39, -2.0),
+                    Position + (FVector(0, 0, Height) + Lean * (0.2 + 0.38 * Tier)) * Scale,
+                    FVector(Width, Width * 0.90, 3.63 - Tier * 0.44) * Scale);
+                CrownTransforms.Add(Entry.Crown[Tier]);
+            }
         }
         TreeTiles.Add(TileIndex(Entry.XY.X, Entry.XY.Y), Trees.Add(Entry));
         TrunkTransforms.Add(Entry.Trunk);
     }
     Trunks->AddInstances(TrunkTransforms, false, false, false);
     Crowns->AddInstances(CrownTransforms, false, false, false);
-    Spoil->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere")));
-    Spoil->SetMaterial(0, GeneratedMaterial(TEXT("Loose")));
-    Spills.SetNum(48);
-    SpillTransforms.Init(FTransform(FRotator::ZeroRotator, FVector(0, 0, -100000), FVector(0.001)), Spills.Num());
-    Spoil->AddInstances(SpillTransforms, false, false, false);
+    BuildGroundCover();
+    auto* ClumpMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Generated/SpoilClump.SpoilClump"));
+    if (!ClumpMesh)
+        ClumpMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+    const TCHAR* Materials[] = { TEXT("Loose"), TEXT("LooseGravel"), TEXT("LooseRock") };
+    for (int32 Kind = 0; Kind < Spoil.Num(); ++Kind)
+    {
+        Spoil[Kind]->SetStaticMesh(ClumpMesh);
+        Spoil[Kind]->SetMaterial(0, GeneratedMaterial(Materials[Kind]));
+        auto& Batch = Spills[Kind];
+        Batch.Pieces.SetNum(36);
+        Batch.Transforms.Init(FTransform(FRotator::ZeroRotator, FVector(0, 0, -100000), FVector(0.001)), Batch.Pieces.Num());
+        Spoil[Kind]->AddInstances(Batch.Transforms, false, false, false);
+    }
 
     TerrainMeshes.SetNum(TilesPerSide * TilesPerSide);
     TileSteps.Init(0, TerrainMeshes.Num());
@@ -266,9 +300,21 @@ Earthwork::Column& AMudTerrain::Edit(int32 Cell)
     return Changed.Add(Cell, OriginalColumn(Cell));
 }
 
-void AMudTerrain::UpdateCell(int32 Cell)
+void AMudTerrain::UpdateCell(int32 Cell, double WorkDelta)
 {
     Heights[Cell] = Changed[Cell].Height();
+    if (FMath::Abs(WorkDelta) > Epsilon)
+    {
+        const double Blend = 1.0 - FMath::Exp(-FMath::Abs(WorkDelta) * 16.0);
+        WorkFinish.Add(Cell, static_cast<float>(FMath::Lerp<double>(WorkFinish.FindRef(Cell), FMath::Sign(WorkDelta), Blend)));
+    }
+    DirtyCell(Cell);
+}
+
+void AMudTerrain::DirtyCell(int32 Cell)
+{
+    if (const int32* Plant = PlantByCell.Find(Cell))
+        DirtyPlants.Add(*Plant);
     const int32 X = Cell % Samples, Y = Cell / Samples;
     for (const int32 DX : {-1, 1})
         for (const int32 DY : {-1, 1})
@@ -287,30 +333,53 @@ TArray<int32> AMudTerrain::Cells(FVector2D XY, double Radius) const
 
 Earthwork::Load AMudTerrain::Excavate(FVector2D XY, double Radius, double Amount, double ToolHeight)
 {
-    Load Result;
-    const auto Area = Cells(XY, Radius);
-    if (Area.IsEmpty() || Amount <= 0)
-        return Result;
-    const auto Weight = [&](int32 Cell)
+    return CutPass(XY, FVector2D(0, 1), FVector2D(Radius, Radius), Amount, ToolHeight);
+}
+
+TArray<TPair<int32, double>> AMudTerrain::ToolFootprint(FVector2D XY, FVector2D Across, FVector2D Reach) const
+{
+    TArray<TPair<int32, double>> Result;
+    const FVector2D Along(Across.Y, -Across.X);
+    for (int32 Cell : Cells(XY, FMath::Max(Reach.X, Reach.Y)))
     {
-        const double Distance = FVector2D::Distance(XY, FVector2D(Cell % Samples, Cell / Samples));
-        return 0.20 + 0.80 * (1.0 - Distance / Radius);
+        const FVector2D Offset = FVector2D(Cell % Samples, Cell / Samples) - XY;
+        const double Distance = FVector2D(FVector2D::DotProduct(Offset, Across) / Reach.X,
+            FVector2D::DotProduct(Offset, Along) / Reach.Y).Size();
+        if (Distance < 1)
+            Result.Emplace(Cell, 1.0 - FMath::Square(Distance));
+    }
+    return Result;
+}
+
+Earthwork::Load AMudTerrain::CutPass(FVector2D XY, FVector2D Across, FVector2D Reach, double Amount, double ToolHeight,
+    double CrossSlope)
+{
+    Load Result;
+    if (Amount <= Epsilon)
+        return Result;
+    const auto Area = ToolFootprint(XY, Across, Reach);
+    const auto CutDepth = [&](int32 Cell)
+    {
+        const FVector2D Offset = FVector2D(Cell % Samples, Cell / Samples) - XY;
+        const double CutPlane = ToolHeight + FVector2D::DotProduct(Offset, Across) * CrossSlope;
+        return Heights[Cell] - CutPlane;
     };
     double TotalWeight = 0;
-    for (int32 Cell : Area)
-        if (Heights[Cell] > ToolHeight + Epsilon)
-            TotalWeight += Weight(Cell);
+    for (const auto& Sample : Area)
+        if (CutDepth(Sample.Key) > Epsilon)
+            TotalWeight += Sample.Value;
     if (TotalWeight <= Epsilon)
         return Result;
-    for (const int32 Cell : Area)
+    for (const auto& Sample : Area)
     {
-        const double Cut = FMath::Min(Amount * Weight(Cell) / TotalWeight, Heights[Cell] - ToolHeight);
+        const int32 Cell = Sample.Key;
+        const double Cut = FMath::Min(Amount * Sample.Value / TotalWeight, CutDepth(Cell));
         if (Cut <= Epsilon)
             continue;
         const Load Removed = Edit(Cell).Cut(Cut);
         Result.Receive(Removed);
         if (Removed.Volume() > Epsilon)
-            UpdateCell(Cell);
+            UpdateCell(Cell, -Removed.Volume());
     }
     return Result;
 }
@@ -331,8 +400,9 @@ Earthwork::Load AMudTerrain::DrawFromPile(const FMudPile& Pile, FVector2D Approa
         const double Cut = FMath::Min(Portion, Heights[Cell] - Floor);
         if (Cut <= Epsilon)
             continue;
-        Result.Receive(Edit(Cell).Cut(Cut));
-        UpdateCell(Cell);
+        const Load Removed = Edit(Cell).Cut(Cut);
+        Result.Receive(Removed);
+        UpdateCell(Cell, -Removed.Volume());
     }
     return Result;
 }
@@ -357,75 +427,155 @@ void AMudTerrain::Deposit(FVector2D XY, double Radius, const Earthwork::Load& Lo
         for (size_t M = 0; M < MaterialCount; ++M)
             Share.Volumes[M] = Load.Volumes[M] * Weights[I] / Total;
         Edit(Area[I]).Fill(Share);
-        UpdateCell(Area[I]);
+        if (Share.Volume() > 0.075)
+            TrackWear.Remove(Area[I]);
+        UpdateCell(Area[I], Share.Volume());
     }
 }
 
-void AMudTerrain::ShowSpill(FVector Origin, double Volume)
+void AMudTerrain::PressTrack(FVector2D Center, FVector2D Forward, double HalfLength, double HalfWidth,
+    double Outward, double Scrub, bool bTracked)
 {
-    SpillCredit += Volume * 12;
-    const int32 Count = FMath::Min(FMath::FloorToInt(SpillCredit), 12);
-    SpillCredit -= Count;
+    const FVector2D Right(-Forward.Y, Forward.X);
+    const double Wet = Wetness(Center);
+    const double EdgeWidth = HalfWidth + Scrub * 0.22;
+    const double Radius = FMath::Sqrt(FMath::Square(HalfLength) + FMath::Square(EdgeWidth));
+    Load Displaced;
+    for (const int32 Cell : Cells(Center, Radius))
+    {
+        const FVector2D Point(Cell % Samples, Cell / Samples);
+        const FVector2D Offset = Point - Center;
+        const double Along = FMath::Abs(FVector2D::DotProduct(Offset, Forward)) / HalfLength;
+        const double Across = FMath::Abs(FVector2D::DotProduct(Offset, Right)) / EdgeWidth;
+        if (Along >= 1 || Across >= 1)
+            continue;
+        const Material Kind = Surface(Point);
+        const double Softness = Kind == Material::Soil ? 1.0 : (Kind == Material::Gravel ? 0.35 : 0.0);
+        const double Contact = (1.0 - Along * Along) * (1.0 - Across * Across);
+        const int32 OldWear = TrackWear.FindRef(Cell);
+        const auto Pressure = RunningGear::PressGround(OldWear, Contact, Softness, Wet, Scrub, bTracked);
+        if (Pressure.Wear == OldWear)
+            continue;
+        TrackWear.Add(Cell, static_cast<uint8>(Pressure.Wear));
+        if (Pressure.Depth > Epsilon)
+        {
+            const Load Cut = Edit(Cell).Cut(Pressure.Depth);
+            if (Cut.Volume() > 0)
+            {
+                Displaced.Receive(Cut);
+                UpdateCell(Cell);
+                continue;
+            }
+        }
+        DirtyCell(Cell);
+    }
+    if (Displaced.Volume() <= 0)
+        return;
+    const FVector2D Edge = Center + Right * Outward * (EdgeWidth + 0.92);
+    const double WorldEdge = GetWorldSize();
+    const FVector2D Bank(FMath::Clamp(Edge.X, 0.0, WorldEdge), FMath::Clamp(Edge.Y, 0.0, WorldEdge));
+    Deposit(Bank, bTracked ? 1.22 : 0.95, Displaced);
+    if (Scrub > 0.22)
+        ShowSpill(FVector(Bank.X, Bank.Y, Height(Bank)), Displaced.Volume(), Displaced.DominantMaterial(),
+            FVector(Right.X, Right.Y, 0) * Outward);
+}
+
+void AMudTerrain::ShowSpill(FVector Origin, double Volume, Material Type, FVector Direction, double FloorZ)
+{
+    auto& Batch = Spills[static_cast<uint8>(Type)];
+    Batch.Credit += Volume * (Type == Material::Gravel ? 26 : 18);
+    const int32 Count = FMath::Min(FMath::FloorToInt(Batch.Credit), 9);
+    Batch.Credit = FMath::Min(Batch.Credit - Count, 1.0);
+    FVector Forward = Direction.GetSafeNormal2D();
+    if (Forward.IsNearlyZero())
+        Forward = FVector::ForwardVector;
+    const FVector Across(-Forward.Y, Forward.X, 0);
     for (int32 I = 0; I < Count; ++I)
     {
-        auto& Clump = Spills[NextSpill];
-        NextSpill = (NextSpill + 1) % Spills.Num();
-        Clump.Position = Origin + FVector(SpillRandom.FRandRange(-0.28, 0.28), SpillRandom.FRandRange(-0.86, 0.86), 0.13);
-        Clump.Velocity = FVector(SpillRandom.FRandRange(-1.1, 1.1), SpillRandom.FRandRange(-0.54, 0.54),
-            SpillRandom.FRandRange(0.4, 1.6));
-        Clump.Life = 1.15;
-        Clump.Radius = SpillRandom.FRandRange(0.045, 0.14);
+        auto& Clump = Batch.Pieces[Batch.Next];
+        Batch.Next = (Batch.Next + 1) % Batch.Pieces.Num();
+        Clump.Position = Origin + Across * SpillRandom.FRandRange(-0.62, 0.62) +
+            Forward * SpillRandom.FRandRange(-0.12, 0.26) + FVector(0, 0, 0.12);
+        Clump.Velocity = Across * SpillRandom.FRandRange(-0.7, 0.7) +
+            Forward * SpillRandom.FRandRange(0.22, 1.85) + FVector(0, 0, SpillRandom.FRandRange(-0.4, 0.88));
+        Clump.Life = 1.65;
+        Clump.Radius = Type == Material::Gravel ? SpillRandom.FRandRange(0.025, 0.074) : SpillRandom.FRandRange(0.045, 0.16);
+        Clump.Spin = SpillRandom.FRandRange(-180, 180);
+        Clump.FloorZ = FloorZ;
+        Clump.bBounced = false;
     }
 }
 
 void AMudTerrain::UpdateSpills(double Dt)
 {
-    bool bChanged = false;
-    for (int32 I = 0; I < Spills.Num(); ++I)
+    for (int32 Kind = 0; Kind < Spoil.Num(); ++Kind)
     {
-        FSpill& Clump = Spills[I];
-        if (Clump.Life <= 0)
-            continue;
-        bChanged = true;
-        Clump.Life -= Dt;
-        Clump.Velocity.Z -= 9.81 * Dt;
-        Clump.Position += Clump.Velocity * Dt;
-        if (Clump.Position.Z <= Height(FVector2D(Clump.Position.X, Clump.Position.Y)) + Clump.Radius * 0.4)
-            Clump.Life = 0;
-        SpillTransforms[I] = Clump.Life > 0
-            ? FTransform(FRotator(I * 53, Clump.Life * 600, I * 71), Clump.Position * 100, FVector(1.3, 0.91, 0.70) * Clump.Radius)
-            : FTransform(FRotator::ZeroRotator, FVector(0, 0, -100000), FVector(0.001));
+        auto& Batch = Spills[Kind];
+        bool bChanged = false;
+        for (int32 I = 0; I < Batch.Pieces.Num(); ++I)
+        {
+            FSpill& Clump = Batch.Pieces[I];
+            if (Clump.Life <= 0)
+                continue;
+            bChanged = true;
+            Clump.Life -= Dt;
+            Clump.Spin += (220 + I * 9) * Dt;
+            Clump.Velocity.Z -= 9.81 * Dt;
+            Clump.Position += Clump.Velocity * Dt;
+            const double Ground = FMath::Max(Height(FVector2D(Clump.Position.X, Clump.Position.Y)), Clump.FloorZ);
+            if (Clump.Position.Z <= Ground + Clump.Radius * 0.15)
+            {
+                if (Kind != static_cast<int32>(Material::Soil) && !Clump.bBounced && Clump.Velocity.Z < -0.8)
+                {
+                    Clump.Position.Z = Ground + Clump.Radius * 0.15;
+                    Clump.Velocity *= FVector(0.56, 0.56, -0.28);
+                    Clump.bBounced = true;
+                }
+                else
+                    Clump.Life = 0;
+            }
+            Batch.Transforms[I] = Clump.Life > 0
+                ? FTransform(FRotator(Clump.Spin, I * 61, Clump.Spin * 0.43), Clump.Position * 100,
+                    FVector(1.35 + 0.08 * (I % 4), 1.06, 0.86) * Clump.Radius)
+                : FTransform(FRotator::ZeroRotator, FVector(0, 0, -100000), FVector(0.001));
+        }
+        if (bChanged)
+            Spoil[Kind]->BatchUpdateInstancesTransforms(0, Batch.Transforms, false, true, true);
     }
-    if (bChanged)
-        Spoil->BatchUpdateInstancesTransforms(0, SpillTransforms, false, true, true);
 }
 
-double AMudTerrain::Grade(FVector2D XY, double Radius, double Rate)
+double AMudTerrain::Grade(FVector2D XY, FVector2D Across, FVector2D Reach, double Rate)
 {
-    const auto Area = Cells(XY, Radius);
+    const auto Area = ToolFootprint(XY, Across, Reach);
     if (Area.Num() < 2)
         return 0;
     double Average = 0;
-    for (int32 Cell : Area)
-        Average += Heights[Cell];
-    Average /= Area.Num();
+    double TotalWeight = 0;
+    for (const auto& Sample : Area)
+    {
+        Average += Heights[Sample.Key] * Sample.Value;
+        TotalWeight += Sample.Value;
+    }
+    Average /= TotalWeight;
+    const double Fraction = FMath::Clamp(Rate, 0.0, 1.0);
     Load Moved;
     double Deficit = 0;
     TArray<TPair<int32, double>> LowCells;
-    for (int32 Cell : Area)
+    for (const auto& Sample : Area)
     {
+        const int32 Cell = Sample.Key;
         const double Excess = Heights[Cell] - Average;
         if (Excess > Epsilon)
         {
-            const Load Cut = Edit(Cell).Cut(Excess * FMath::Clamp(Rate, 0.0, 1.0));
+            const Load Cut = Edit(Cell).Cut(Excess * Sample.Value * Fraction);
             Moved.Receive(Cut);
             if (Cut.Volume() > 0)
-                UpdateCell(Cell);
+                UpdateCell(Cell, -Cut.Volume());
         }
         else if (Excess < 0.0)
         {
-            Deficit -= Excess;
-            LowCells.Emplace(Cell, -Excess);
+            Deficit -= Excess * Sample.Value;
+            LowCells.Emplace(Cell, -Excess * Sample.Value);
         }
     }
     if (Deficit <= 0 || Moved.Volume() <= 0)
@@ -436,7 +586,7 @@ double AMudTerrain::Grade(FVector2D XY, double Radius, double Rate)
         for (size_t M = 0; M < MaterialCount; ++M)
             Share.Volumes[M] = Moved.Volumes[M] * Entry.Value / Deficit;
         Edit(Entry.Key).Fill(Share);
-        UpdateCell(Entry.Key);
+        UpdateCell(Entry.Key, Share.Volume());
     }
     return Moved.Volume();
 }
@@ -485,7 +635,7 @@ void AMudTerrain::BuildTile(int32 Id, int32 Step)
     const int32 Edge = TileSize / Step + 1;
     TArray<FVector> Vertices, Normals;
     TArray<int32> Triangles;
-    TArray<FVector2D> UV;
+    TArray<FVector2D> UV, FinishMasks;
     TArray<FLinearColor> Colors;
     TArray<FProcMeshTangent> Tangents;
     const int32 BorderCount = (Edge - 1) * 4;
@@ -493,6 +643,7 @@ void AMudTerrain::BuildTile(int32 Id, int32 Step)
     Vertices.Reserve(VertexCount);
     Normals.Reserve(VertexCount);
     UV.Reserve(VertexCount);
+    FinishMasks.Reserve(VertexCount);
     Colors.Reserve(VertexCount);
     Tangents.Reserve(VertexCount);
     Triangles.Reserve(6 * ((Edge - 1) * (Edge - 1) + BorderCount));
@@ -505,15 +656,22 @@ void AMudTerrain::BuildTile(int32 Id, int32 Step)
             const int32 Cell = Index(GX, GY);
             const double Z = Heights[Cell];
             const Material Kind = Surface(XY);
-            bool bGrass = !Changed.Contains(Cell);
+            const double Finish = WorkFinish.FindRef(Cell);
+            bool bGrass = Kind == Material::Soil && FMath::Abs(Original[Cell] - Z) < 0.035 &&
+                FMath::Abs(Finish) < 0.16;
             for (const FMudPile& Pile : Piles)
                 bGrass &= FVector2D::DistSquared(XY, Pile.Center) >= FMath::Square(Pile.Radius);
             Vertices.Emplace(X * Step * 100.0, Y * Step * 100.0, Z * 100.0);
             const FVector Up = Normal(XY);
             Normals.Add(Up);
             UV.Add(XY);
+            FinishMasks.Emplace(FMath::Max(0.0, -Finish), FMath::Max(0.0, Finish));
             const double Exposed = FMath::Clamp((Original[Cell] - Z) * 0.95, 0.0, 0.52);
-            Colors.Add(GroundMasks(Kind, FMath::Max(Wetness(XY), Exposed), Up.Z, XY, bGrass));
+            FLinearColor Masks = GroundMasks(Kind, FMath::Max(Wetness(XY), Exposed), Up.Z, XY, bGrass);
+            const float Wear = TrackWear.FindRef(Cell) / 255.0f;
+            Masks.R *= 1.0f - 0.92f * Wear;
+            Masks.B *= 1.0f - 0.60f * Wear;
+            Colors.Add(Masks);
             Tangents.Emplace(FVector::CrossProduct(FVector::RightVector, Up).GetSafeNormal(), false);
             if (X == 0 || Y == 0)
                 continue;
@@ -533,11 +691,13 @@ void AMudTerrain::BuildTile(int32 Id, int32 Step)
     {
         const FVector NormalCopy = Normals[I];
         const FVector2D UVCopy = UV[I];
+        const FVector2D FinishCopy = FinishMasks[I];
         const FLinearColor ColorCopy = Colors[I];
         const FProcMeshTangent TangentCopy = Tangents[I];
         Vertices.Add(Vertices[I] - FVector(0, 0, 350));
         Normals.Add(NormalCopy);
         UV.Add(UVCopy);
+        FinishMasks.Add(FinishCopy);
         Colors.Add(ColorCopy);
         Tangents.Add(TangentCopy);
     }
@@ -561,18 +721,86 @@ void AMudTerrain::BuildTile(int32 Id, int32 Step)
     }
     if (TileSteps[Id] == Step)
     {
-        Mesh->UpdateMeshSection_LinearColor(0, Vertices, Normals, UV, Colors, Tangents, false);
+        Mesh->UpdateMeshSection_LinearColor(0, Vertices, Normals, UV, FinishMasks, {}, {}, Colors, Tangents, false);
     }
     else
     {
         Mesh->SetCollisionEnabled(Step == 1 ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
-        Mesh->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, UV, Colors, Tangents, Step == 1, false);
+        Mesh->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, UV, FinishMasks, {}, {},
+            Colors, Tangents, Step == 1, false);
     }
     TileSteps[Id] = Step;
 }
 
+void AMudTerrain::BuildGroundCover()
+{
+    auto* Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Generated/MeadowTuft.MeadowTuft"));
+    auto* Material = GeneratedMaterial(TEXT("Meadow"));
+    if (!Mesh || !Material)
+        return;
+    Meadow->SetStaticMesh(Mesh);
+    Meadow->SetMaterial(0, Material);
+    FRandomStream Scatter(Seed ^ 0x4d454144);
+    TArray<FTransform> Transforms;
+    const FVector2D StartXY(Start.X, Start.Y);
+    const FVector2D GoalXY(Goal.X, Goal.Y);
+    for (int32 Y = 5; Y < Samples - 5; Y += 5)
+    {
+        for (int32 X = 5; X < Samples - 5; X += 5)
+        {
+            const FVector2D Point(X + Scatter.FRandRange(-2, 2), Y + Scatter.FRandRange(-2, 2));
+            if (FVector2D::DistSquared(Point, StartXY) < FMath::Square(12.0) ||
+                FVector2D::DistSquared(Point, GoalXY) < FMath::Square(11.0) ||
+                Surface(Point) != Earthwork::Material::Soil || WaterDepth(Point) > 0.015)
+                continue;
+            const FVector Up = Normal(Point);
+            const double Wet = Wetness(Point);
+            const double Cover = GroundMasks(Earthwork::Material::Soil, Wet, Up.Z, Point, true).R;
+            if (Scatter.FRand() > Cover * 0.62)
+                continue;
+            const int32 Cell = Index(FMath::RoundToInt(Point.X), FMath::RoundToInt(Point.Y));
+            if (PlantByCell.Contains(Cell))
+                continue;
+            const double Width = Scatter.FRandRange(0.74, 1.55);
+            const double HeightScale = Scatter.FRandRange(0.56, 1.46);
+            const FTransform Transform(FRotator(0, Scatter.FRandRange(0, 360), 0),
+                FVector(Point.X, Point.Y, Height(Point)) * 100.0, FVector(Width, Width, HeightScale));
+            PlantByCell.Add(Cell, Plants.Add({Transform, Cell}));
+            Transforms.Add(Transform);
+        }
+    }
+    Meadow->AddInstances(Transforms, false, false, false);
+    UE_LOG(LogTemp, Display, TEXT("Valley foliage: %d trees, %d grass tufts"), Trees.Num(), Plants.Num());
+}
+
+void AMudTerrain::UpdateGroundCover()
+{
+    if (DirtyPlants.IsEmpty())
+        return;
+    bool bChanged = false;
+    for (const int32 Id : DirtyPlants)
+    {
+        FGroundPlant& Plant = Plants[Id];
+        const bool bHide = FMath::Abs(Heights[Plant.Cell] - Original[Plant.Cell]) > 0.075 ||
+            FMath::Abs(WorkFinish.FindRef(Plant.Cell)) > 0.22 ||
+            TrackWear.FindRef(Plant.Cell) >= 72;
+        if (Plant.bHidden == bHide)
+            continue;
+        Plant.bHidden = bHide;
+        FTransform Transform = Plant.Transform;
+        if (bHide)
+            Transform.SetScale3D(FVector(0.001));
+        Meadow->UpdateInstanceTransform(Id, Transform, false, false, true);
+        bChanged = true;
+    }
+    if (bChanged)
+        Meadow->MarkRenderStateDirty();
+    DirtyPlants.Reset();
+}
+
 void AMudTerrain::UpdateTiles(FVector2D Focus)
 {
+    UpdateGroundCover();
     TArray<TPair<double, int32>> Candidates;
     for (int32 Id = 0; Id < TerrainMeshes.Num(); ++Id)
     {
@@ -684,14 +912,14 @@ void AMudTerrain::HideTree(int32 Id)
     Hidden.SetScale3D(FVector(0.001));
     Hidden.AddToTranslation(FVector(0, 0, -2000));
     Trunks->UpdateInstanceTransform(Id, Hidden, false, true, true);
-    for (int32 Tier = 0; Tier < CrownTiers; ++Tier)
-        Crowns->UpdateInstanceTransform(Id * CrownTiers + Tier, Hidden, false, Tier == CrownTiers - 1, true);
+    for (int32 Tier = 0; Tier < CrownInstancesPerTree; ++Tier)
+        Crowns->UpdateInstanceTransform(Id * CrownInstancesPerTree + Tier, Hidden, false, Tier == CrownInstancesPerTree - 1, true);
 }
 
 TSharedRef<FJsonObject> AMudTerrain::SaveTerrain() const
 {
     auto Data = MakeShared<FJsonObject>();
-    TArray<TSharedPtr<FJsonValue>> Edits, Removed;
+    TArray<TSharedPtr<FJsonValue>> Edits, Removed, Tracks;
     for (const auto& Entry : Changed)
     {
         auto Row = MakeShared<FJsonObject>();
@@ -703,6 +931,8 @@ TSharedRef<FJsonObject> AMudTerrain::SaveTerrain() const
             JsonLayers.Add(MakeShared<FJsonValueNumber>(Layer.Volume));
         }
         Row->SetArrayField(TEXT("layers"), JsonLayers);
+        if (const float* Finish = WorkFinish.Find(Entry.Key))
+            Row->SetNumberField(TEXT("finish"), *Finish);
         Edits.Add(MakeShared<FJsonValueObject>(Row));
     }
     for (int32 Id = 0; Id < Trees.Num(); ++Id)
@@ -710,6 +940,12 @@ TSharedRef<FJsonObject> AMudTerrain::SaveTerrain() const
             Removed.Add(MakeShared<FJsonValueNumber>(Id));
     Data->SetArrayField(TEXT("edits"), Edits);
     Data->SetArrayField(TEXT("removedTrees"), Removed);
+    for (const auto& Entry : TrackWear)
+    {
+        Tracks.Add(MakeShared<FJsonValueNumber>(Entry.Key));
+        Tracks.Add(MakeShared<FJsonValueNumber>(Entry.Value));
+    }
+    Data->SetArrayField(TEXT("trackWear"), Tracks);
     return Data;
 }
 
@@ -720,7 +956,23 @@ bool AMudTerrain::RestoreTerrain(const TSharedPtr<FJsonObject>& Data)
         !Data->TryGetArrayField(TEXT("removedTrees"), Removed))
         return false;
     TMap<int32, Earthwork::Column> Restored;
+    TMap<int32, float> RestoredFinish;
+    TMap<int32, uint8> RestoredTracks;
     TSet<int32> RemovedIds;
+    if (Data->HasField(TEXT("trackWear")))
+    {
+        const TArray<TSharedPtr<FJsonValue>>* Tracks;
+        if (!Data->TryGetArrayField(TEXT("trackWear"), Tracks) || Tracks->Num() % 2)
+            return false;
+        for (int32 I = 0; I < Tracks->Num(); I += 2)
+        {
+            double Cell, Wear;
+            if (!(*Tracks)[I]->TryGetNumber(Cell) || Cell < 0 || Cell >= Original.Num() || Cell != FMath::FloorToDouble(Cell) ||
+                !(*Tracks)[I + 1]->TryGetNumber(Wear) || Wear < 1 || Wear > 255 || Wear != FMath::FloorToDouble(Wear))
+                return false;
+            RestoredTracks.Add(static_cast<int32>(Cell), static_cast<uint8>(Wear));
+        }
+    }
     for (const auto& Value : *Edits)
     {
         const TSharedPtr<FJsonObject>* Row;
@@ -730,6 +982,13 @@ bool AMudTerrain::RestoreTerrain(const TSharedPtr<FJsonObject>& Data)
             !Original.IsValidIndex(Cell) || !(*Row)->TryGetArrayField(TEXT("layers"), JsonLayers) || JsonLayers->Num() % 2)
             return false;
         auto Column = OriginalColumn(Cell);
+        if ((*Row)->HasField(TEXT("finish")))
+        {
+            double Finish;
+            if (!(*Row)->TryGetNumberField(TEXT("finish"), Finish) || !FMath::IsFinite(Finish) || FMath::Abs(Finish) > 1)
+                return false;
+            RestoredFinish.Add(Cell, static_cast<float>(Finish));
+        }
         Column.Layers.clear();
         for (int32 I = 0; I < JsonLayers->Num(); I += 2)
         {
@@ -750,13 +1009,14 @@ bool AMudTerrain::RestoreTerrain(const TSharedPtr<FJsonObject>& Data)
         RemovedIds.Add(static_cast<int32>(Id));
     }
     for (const auto& Entry : Changed)
-    {
-        const int32 X = Entry.Key % Samples, Y = Entry.Key / Samples;
-        for (int32 DX : {-1, 1})
-            for (int32 DY : {-1, 1})
-                Dirty.Add(TileIndex(X + DX, Y + DY));
-    }
+        DirtyCell(Entry.Key);
+    for (const auto& Entry : TrackWear)
+        DirtyCell(Entry.Key);
+    TrackWear = MoveTemp(RestoredTracks);
+    for (const auto& Entry : TrackWear)
+        DirtyCell(Entry.Key);
     Changed = MoveTemp(Restored);
+    WorkFinish = MoveTemp(RestoredFinish);
     Heights = Original;
     for (const auto& Entry : Changed)
         UpdateCell(Entry.Key);
@@ -768,9 +1028,9 @@ bool AMudTerrain::RestoreTerrain(const TSharedPtr<FJsonObject>& Data)
         {
             Trees[Id].bRemoved = false;
             Trunks->UpdateInstanceTransform(Id, Trees[Id].Trunk, false, true, true);
-            for (int32 Tier = 0; Tier < CrownTiers; ++Tier)
-                Crowns->UpdateInstanceTransform(Id * CrownTiers + Tier, Trees[Id].Crown[Tier],
-                    false, Tier == CrownTiers - 1, true);
+            for (int32 Tier = 0; Tier < CrownInstancesPerTree; ++Tier)
+                Crowns->UpdateInstanceTransform(Id * CrownInstancesPerTree + Tier, Trees[Id].Crown[Tier],
+                    false, Tier == CrownInstancesPerTree - 1, true);
         }
     }
     return true;

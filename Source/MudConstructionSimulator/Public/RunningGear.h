@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 
 namespace RunningGear
@@ -27,6 +28,23 @@ inline double SteeringDegrees(double CenterDegrees, double Wheelbase, double Lat
     const double Angle = CenterDegrees * (Pi / 180.0);
     const double Sin = std::sin(Angle);
     return std::atan2(Wheelbase * Sin, Wheelbase * std::cos(Angle) - LateralOffset * Sin) * (180.0 / Pi);
+}
+
+struct TrackPressure
+{
+    int Wear;
+    double Depth;
+};
+
+inline TrackPressure PressGround(int CurrentWear, double Contact, double Softness, double Wet, double Scrub, bool Tracked)
+{
+    const int Limit = Tracked ? static_cast<int>(std::lround(150 + Scrub * 105)) : 120;
+    const int Gain = static_cast<int>(std::lround(Contact * (Tracked ? 50 + 68 * Scrub : 29) *
+        (0.3 + Wet * 0.7) * (0.38 + Softness * 0.62)));
+    const int Applied = std::clamp(Gain, 0, std::max(0, Limit - CurrentWear));
+    const double Depth = (Applied / 255.0) * Softness *
+        (Tracked ? 0.055 + Wet * 0.17 + Scrub * (0.14 + Wet * 0.20) : 0.025 + Wet * 0.13);
+    return {CurrentWear + Applied, Depth};
 }
 
 struct TrackPath

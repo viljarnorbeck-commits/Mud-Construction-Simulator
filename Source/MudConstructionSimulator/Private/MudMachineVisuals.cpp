@@ -53,10 +53,26 @@ UProceduralMeshComponent* Skin(AActor& Owner, USceneComponent* Parent)
     Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
     return Mesh;
 }
+
+void MachineMark(AActor& Owner, USceneComponent* Parent, const TCHAR* Label, FVector Position,
+    double Yaw, float Height, FColor Color = FColor::White)
+{
+    auto* Mark = NewObject<UTextRenderComponent>(&Owner);
+    Mark->SetupAttachment(Parent);
+    Mark->SetRelativeLocation(Position);
+    Mark->SetRelativeRotation(FRotator(0, Yaw, 0));
+    Mark->SetText(FText::FromString(Label));
+    Mark->SetHorizontalAlignment(EHTA_Center);
+    Mark->SetVerticalAlignment(EVRTA_TextCenter);
+    Mark->SetWorldSize(Height);
+    Mark->SetTextRenderColor(Color);
+    Mark->SetCastShadow(false);
+    Mark->RegisterComponent();
+}
 }
 
 void AMudMachine::BevelBody(USceneComponent* Parent, const TCHAR* Paint, TConstArrayView<FVector2D> Profile,
-    double CenterY, double HalfWidth, double Bevel)
+    double CenterY, double HalfWidth, double Bevel, bool bBeam)
 {
     FVector2D Center = FVector2D::ZeroVector;
     for (const FVector2D& Point : Profile)
@@ -78,15 +94,30 @@ void AMudMachine::BevelBody(USceneComponent* Parent, const TCHAR* Paint, TConstA
         Ring(HalfWidth - Bevel, 0), Ring(HalfWidth, Bevel)
     };
     FSurface Body;
-    Body.Face(Rings[0], FVector(0, -1, 0));
-    Body.Face(Rings[3], FVector(0, 1, 0));
+    for (const int32 Side : {0, 3})
+    {
+        const FVector Out(0, Side == 0 ? -1 : 1, 0);
+        const auto& Points = Rings[Side];
+        if (bBeam)
+        {
+            // Pair the lower and upper outlines at each station of the curved beam.
+            const int32 Last = Points.Num() - 1;
+            for (int32 I = 0; I < Points.Num() / 2 - 1; ++I)
+                Body.Quad(Points[I], Points[I + 1], Points[Last - I - 1], Points[Last - I], Out);
+        }
+        else
+            Body.Face(Points, Out);
+    }
     for (int32 I = 0; I < Profile.Num(); ++I)
     {
         const int32 J = (I + 1) % Profile.Num();
         for (int32 R = 0; R < 3; ++R)
         {
             const FVector A = Rings[R][I], B = Rings[R][J], C = Rings[R + 1][J], D = Rings[R + 1][I];
-            Body.Quad(A, B, C, D, (A + B + C + D) * 0.25 - FVector(Center.X, CenterY, Center.Y));
+            const FVector2D Edge = Profile[J] - Profile[I];
+            const FVector Out = bBeam ? FVector(Edge.Y, 0, -Edge.X) :
+                (A + B + C + D) * 0.25 - FVector(Center.X, CenterY, Center.Y);
+            Body.Quad(A, B, C, D, Out);
         }
     }
     auto* Mesh = Skin(*this, Parent);
@@ -156,6 +187,18 @@ void AMudMachine::BuildCab(USceneComponent* Parent, const TCHAR* Paint, FVector 
         if (I % 2 == 0)
             Rail(FMath::Lerp(Sill[I], Sill[J], 0.70), FMath::Lerp(Roof[I], Roof[J], 0.70), 0.045);
     }
+    const auto Windshield = [&](double U, double V)
+    {
+        return FMath::Lerp(FMath::Lerp(Sill[1], Sill[2], U), FMath::Lerp(Roof[1], Roof[2], U), V) +
+            FVector(1.8, 0, 0);
+    };
+    Rail(Windshield(0.70, 0.04), Windshield(0.47, 0.29), 0.019);
+    Rail(Windshield(0.29, 0.23), Windshield(0.58, 0.34), 0.027);
+    if (Kind == EMudMachine::Dumper || Kind == EMudMachine::Truck)
+    {
+        Rail(Windshield(0.32, 0.04), Windshield(0.18, 0.19), 0.019);
+        Rail(Windshield(0.07, 0.14), Windshield(0.34, 0.24), 0.027);
+    }
     for (double Side : {-1.0, 1.0})
     {
         Part(TEXT("Cube"), TEXT("Chassis"), Cab, FVector(0, Side * (Y + 0.3), 8),
@@ -195,7 +238,7 @@ void AMudMachine::BuildCabControls(USceneComponent* Cab, FVector Size)
     CabDisplay->RegisterComponent();
     UpdateCabInstruments();
 
-    if (bHauler)
+    if (bHauler || Kind == EMudMachine::Loader)
     {
         auto* Column = Pivot(Cab, {Size.X * 0.21, DriverY, Size.Z * 0.47});
         Column->SetRelativeRotation(FRotator(-38, 0, 0));
@@ -228,7 +271,8 @@ void AMudMachine::BuildCabControls(USceneComponent* Cab, FVector Size)
             Part(TEXT("Cube"), TEXT("Chassis"), CabWheel, Direction.RotateVector({0, 11, 0}),
                 {0.028, 0.13, 0.034}, Direction);
         }
-        return;
+        if (bHauler)
+            return;
     }
     for (const double Side : {-1.0, 1.0})
     {
@@ -248,12 +292,14 @@ void AMudMachine::UpdateCabInstruments()
     if (CabLeverA)
     {
         const double InputScale = Kind == EMudMachine::Dozer ? 29 : 0.38;
-        CabLeverA->SetRelativeRotation(FRotator(FMath::Clamp(-ValveA * InputScale, -22.0, 22.0), 0, 0));
+        CabLeverA->SetRelativeRotation(FRotator(FMath::Clamp(-ValveA * InputScale, -22.0, 22.0), 0,
+            FMath::Clamp(ValveB * 0.38, -22.0, 22.0)));
     }
     if (CabLeverB)
     {
-        const double Input = Kind == EMudMachine::Dozer ? SteeringCommand * 20 : -ValveB * 0.38;
-        CabLeverB->SetRelativeRotation(FRotator(FMath::Clamp(Input, -22.0, 22.0), 0, 0));
+        const double Input = Kind == EMudMachine::Dozer ? SteeringCommand * 20 : -ValveCurl * 0.38;
+        CabLeverB->SetRelativeRotation(FRotator(FMath::Clamp(Input, -22.0, 22.0), 0,
+            FMath::Clamp(ValveSwing * 0.38, -22.0, 22.0)));
     }
     const TCHAR* Direction = Speed > 0.12 ? TEXT("F") : Speed < -0.12 ? TEXT("R") : TEXT("N");
     const FString Readout = FString::Printf(TEXT("%s  %02.0f km/h\nPAYLOAD  %.1f t"), Direction,
@@ -267,51 +313,88 @@ void AMudMachine::UpdateCabInstruments()
 
 void AMudMachine::BuildExcavatorBody(const TCHAR* Paint)
 {
-    const FVector2D Tail[] = {{-229, 22}, {-205, 8}, {85, 8}, {93, 51}, {65, 96}, {-52, 116}, {-187, 116}, {-226, 94}};
-    BevelBody(Turret, Paint, Tail, 0, 114, 14);
+    const bool bShortTail = Kind == EMudMachine::Dozer;
+    const double Rear = bShortTail ? -169 : -229;
+    const FVector2D Tail[] = {{Rear, 29}, {Rear + 24, 8}, {85, 8}, {93, 51}, {65, 98},
+        {-22, 119}, {Rear + 38, 121}, {Rear + 10, 106}};
+    BevelBody(Turret, Paint, Tail, 0, 114, bShortTail ? 24 : 15);
     Part(TEXT("Cylinder"), TEXT("Chassis"), GetRootComponent(), {0, 0, 123}, {1.83, 1.83, 0.24});
-    BuildCab(Turret, Paint, {16, -59, 102}, {156, 101, 131}, 19);
-    Part(TEXT("Cube"), TEXT("Chassis"), Turret, {-80, 113, 76}, {1.49, 0.028, 0.43});
+    BuildCab(Turret, TEXT("Chassis"), {16, -59, 102}, {156, 101, 131}, bShortTail ? 13 : 19);
+    const double VentX = bShortTail ? -52 : -80;
+    Part(TEXT("Cube"), TEXT("Chassis"), Turret, {VentX, 114, 72}, {1.28, 0.028, 0.39});
     TArray<FTransform> Vents;
     for (int32 I = 0; I < 8; ++I)
-        Vents.Emplace(FRotator::ZeroRotator, FVector(-142 + I * 17.0, 116, 76), FVector(0.024, 0.035, 0.34));
+        Vents.Emplace(FRotator::ZeroRotator, FVector(VentX - 52 + I * 15.0, 116, 72), FVector(0.028, 0.035, 0.28));
     RepeatedBoxes(TEXT("Steel"), Turret, Vents);
     Part(TEXT("Cube"), TEXT("Chassis"), Turret, {-99, 110, 26}, {1.79, 0.047, 0.15});
     Part(TEXT("Cube"), TEXT("Steel"), Turret, {-6, -118, 38}, {0.48, 0.23, 0.067});
-    Part(TEXT("Cylinder"), TEXT("Chassis"), Turret, {-171, 61, 139}, {0.16, 0.16, 0.50});
-    Part(TEXT("Cylinder"), TEXT("Steel"), Turret, {-171, 61, 166}, {0.21, 0.21, 0.045}, FRotator(17, 0, 0));
+    Part(TEXT("Cylinder"), TEXT("Chassis"), Turret, {Rear + 58, 61, 139}, {0.16, 0.16, 0.50});
+    Part(TEXT("Cylinder"), TEXT("Steel"), Turret, {Rear + 58, 61, 166}, {0.21, 0.21, 0.045}, FRotator(17, 0, 0));
     Part(TEXT("Cube"), TEXT("Chassis"), Turret, {85, -94, 239}, {0.13, 0.26, 0.12});
     Part(TEXT("Cube"), TEXT("Headlight"), Turret, {92, -94, 239}, {0.025, 0.22, 0.093});
-    Part(TEXT("Cube"), TEXT("RedLamp"), Turret, {-216, -50, 79}, {0.04, 0.22, 0.085});
-
-    const FVector2D BoomShape[] = {{-27, -14}, {77, -21}, {193, -23}, {339, -16}, {364, -7}, {360, 15},
-        {207, 41}, {109, 34}, {-14, 25}};
-    BevelBody(BoomPivot, Paint, BoomShape, 0, 19, 4);
-    const FVector2D StickShape[] = {{-18, -12}, {174, -16}, {229, -12}, {242, 2}, {224, 14}, {131, 22}, {-15, 22}};
-    BevelBody(StickPivot, Paint, StickShape, 0, 14, 3);
+    Part(TEXT("Cube"), TEXT("RedLamp"), Turret, {Rear - 1, -50, 79}, {0.04, 0.22, 0.085});
+    const TCHAR* Model = bShortTail ? TEXT("ECR255") : TEXT("EC300E");
     for (const double Side : {-1.0, 1.0})
     {
-        Part(TEXT("Cylinder"), TEXT("CylinderRod"), StickPivot, {0, Side * 19, 0}, {0.37, 0.37, 0.075}, FRotator(0, 0, 90));
-        Part(TEXT("Cylinder"), TEXT("CylinderRod"), Tool, {0, Side * 15, 0}, {0.26, 0.26, 0.072}, FRotator(0, 0, 90));
+        MachineMark(*this, Turret, Model, {Rear + 89, Side * 117, 103}, Side * 90, 15, FColor(34, 37, 39));
+        MachineMark(*this, BoomPivot, TEXT("VOLVO"), {109, Side * 20, 33}, Side * 90, 21);
+    }
+    MachineMark(*this, Turret, TEXT("VOLVO"), {Rear - 3, 0, 66}, 180, 21, FColor(34, 37, 39));
+
+    TArray<FTransform> Handrails;
+    for (const double X : {VentX - 48, VentX + 8, VentX + 64})
+        Handrails.Emplace(FRotator::ZeroRotator, FVector(X, 100, 136), FVector(0.038, 0.038, 0.39));
+    Handrails.Emplace(FRotator::ZeroRotator, FVector(VentX + 8, 100, 157), FVector(1.18, 0.039, 0.039));
+    RepeatedBoxes(TEXT("Ochre"), Turret, Handrails);
+
+    const double Elbow = StickMount.X;
+    const FVector2D BoomShape[] = {
+        {-26, -17}, {4, -26}, {68, -11}, {139, 18}, {189, 29}, {262, 6}, {Elbow, -19}, {Elbow + 18, -12},
+        {Elbow + 18, 11}, {Elbow, 21}, {262, 53}, {189, 78}, {139, 73}, {68, 36}, {4, 23}, {-26, 15}};
+    BevelBody(BoomPivot, TEXT("Chassis"), BoomShape, 0, 19, 4, true);
+    const double BucketEnd = BucketMount.X;
+    const FVector2D StickShape[] = {
+        {-19, -14}, {0, -23}, {63, -20}, {134, -17}, {BucketEnd, -13}, {BucketEnd + 14, -8},
+        {BucketEnd + 14, 9}, {BucketEnd, 15}, {134, 29}, {63, 32}, {0, 23}, {-19, 14}};
+    BevelBody(StickPivot, TEXT("Chassis"), StickShape, 0, 14, 3, true);
+
+    // Expose the three pivot axles and support the cylinders on their actual pins.
+    Part(TEXT("Cylinder"), TEXT("Chassis"), BoomPivot, {163, 0, 22}, {0.27, 0.27, 0.63}, FRotator(0, 0, 90));
+    Part(TEXT("Cube"), TEXT("Chassis"), BoomPivot, {158, 0, 77}, {0.34, 0.29, 0.34});
+    const FVector2D RamEar[] = {{StickRamPin.X - 12, 53}, {-21, 16}, {14, 10}, {8, 38},
+        {StickRamPin.X - 3, 72}, {StickRamPin.X - 13, 65}};
+    BevelBody(StickPivot, TEXT("Chassis"), RamEar, 0, 11, 3);
+    if (!bShortTail)
+    {
+        const double X = BucketRamBase.X, Z = BucketRamBase.Z;
+        const FVector2D BucketRamEar[] = {{X - 18, Z - 32}, {X + 19, Z - 32}, {X + 11, Z + 7}, {X - 9, Z + 9}};
+        for (const double Side : {-1.0, 1.0})
+            BevelBody(StickPivot, TEXT("Chassis"), BucketRamEar, Side * 8.5, 3.5, 1.5);
+    }
+    for (const double Side : {-1.0, 1.0})
+    {
+        const FVector2D MountPlate[] = {{-28, -32}, {21, -33}, {25, 4}, {12, 24}, {-13, 24}, {-30, 9}};
+        auto* Mount = Pivot(Turret, BoomMount + FVector(0, Side * 24, 0));
+        BevelBody(Mount, TEXT("Chassis"), MountPlate, 0, 4, 1);
+        Part(TEXT("Cylinder"), TEXT("CylinderRod"), Mount, {0, Side * 5, 0}, {0.34, 0.34, 0.064}, FRotator(0, 0, 90));
+        Part(TEXT("Cylinder"), TEXT("CylinderRod"), BoomPivot, StickMount + FVector(0, Side * 21, 0),
+            {0.39, 0.39, 0.066}, FRotator(0, 0, 90));
+        Part(TEXT("Cylinder"), TEXT("CylinderRod"), StickPivot, BucketMount + FVector(0, Side * 15, 0),
+            {0.26, 0.26, 0.072}, FRotator(0, 0, 90));
     }
 }
 
 void AMudMachine::BuildDozerBody(const TCHAR* Paint)
 {
-    const FVector2D Hood[] = {{-82, 5}, {176, 5}, {195, 26}, {177, 89}, {143, 99}, {-67, 105}};
-    BevelBody(Turret, Paint, Hood, 0, 79, 10);
-    BuildCab(Turret, Paint, {-107, 0, 62}, {122, 154, 144}, 11);
-    Part(TEXT("Cube"), TEXT("Chassis"), Turret, {187, 0, 53}, {0.12, 1.15, 0.61}, FRotator(-13, 0, 0));
-    TArray<FTransform> Grille;
-    for (int32 I = 0; I < 9; ++I)
-        Grille.Emplace(FRotator(-13, 0, 0), FVector(194, -48 + I * 12.0, 53), FVector(0.058, 0.029, 0.48));
-    RepeatedBoxes(TEXT("Steel"), Turret, Grille);
-    Part(TEXT("Cylinder"), TEXT("Chassis"), Turret, {101, 44, 115}, {0.14, 0.14, 0.51});
-    for (double Side : {-1.0, 1.0})
-    {
-        Part(TEXT("Cube"), TEXT("Headlight"), Turret, {-44, Side * 59, 194}, {0.13, 0.24, 0.13});
-        Part(TEXT("Cube"), TEXT("Chassis"), Turret, {-109, Side * 88, 51}, {0.47, 0.23, 0.08});
-    }
+    // The ECR255 works on its front blade with the digging boom folded clear of it.
+    BoomPivot->SetRelativeRotation(FRotator(39, 0, 0));
+    StickPivot->SetRelativeRotation(FRotator(-145, 0, 0));
+    BuildExcavatorBody(Paint);
+    auto* ParkedBucket = Pivot(StickPivot, BucketMount);
+    ParkedBucket->SetRelativeRotation(FRotator(100, 0, 0));
+    const FVector2D Bucket[] = {{-65, -29}, {21, -26}, {29, -5}, {22, 11}, {-23, 9}, {-59, -9}};
+    BevelBody(ParkedBucket, TEXT("WornSteel"), Bucket, 0, 44, 5);
+    Part(TEXT("Cube"), TEXT("CuttingEdge"), ParkedBucket, {-62, 0, -28}, {0.14, 0.91, 0.055});
 }
 
 void AMudMachine::BuildBlade()
@@ -341,35 +424,152 @@ void AMudMachine::BuildBlade()
     RepeatedBoxes(TEXT("Steel"), Tool, Fasteners);
 }
 
+void AMudMachine::BuildTyreShell(USceneComponent* Hub, double WidthScale)
+{
+    // Cross section in centimetres from one bead to the other.
+    const FVector2D Profile[] = {
+        {-28, 33}, {-28, 44}, {-26, 53}, {-22, 59}, {-16, 62}, {-8, 62.4},
+        {8, 62.4}, {16, 62}, {22, 59}, {26, 53}, {28, 44}, {28, 33}};
+    constexpr int32 Segments = 40;
+    constexpr int32 RingSize = Segments + 1;
+    constexpr int32 RingCount = UE_ARRAY_COUNT(Profile);
+    FSurface Tyre;
+    for (int32 Ring = 0; Ring < RingCount; ++Ring)
+    {
+        const FVector2D Sample = Profile[Ring];
+        const FVector2D Across = Profile[FMath::Min(Ring + 1, RingCount - 1)] - Profile[FMath::Max(Ring - 1, 0)];
+        const FVector2D SectionNormal(Across.X * WidthScale, -Across.Y);
+        for (int32 Segment = 0; Segment < RingSize; ++Segment)
+        {
+            const double Angle = 2 * PI * Segment / Segments;
+            const FVector Radial(FMath::Cos(Angle), 0, FMath::Sin(Angle));
+            Tyre.Vertices.Add(Radial * Sample.Y + FVector(0, Sample.X * WidthScale, 0));
+            Tyre.Normals.Add((Radial * SectionNormal.X + FVector(0, SectionNormal.Y, 0)).GetSafeNormal());
+            Tyre.UVs.Emplace(4.0 * Segment / Segments, (Sample.X + 28.0) / 56.0);
+            Tyre.Tangents.Emplace(FVector(-Radial.Z, 0, Radial.X), false);
+            if (Ring == 0 || Segment == 0)
+                continue;
+            const int32 I = Ring * RingSize + Segment;
+            Tyre.Indices.Append({I - RingSize - 1, I - RingSize, I - 1, I - RingSize, I, I - 1});
+        }
+    }
+    auto* Mesh = Skin(*this, Hub);
+    Tyre.Apply(*Mesh, 0, TEXT("Tyre"));
+    Mesh->RegisterComponent();
+}
+
+void AMudMachine::BuildBucketEdge(double HalfWidth, FVector Lip, bool bLoader)
+{
+    if (bLoader)
+    {
+        Part(TEXT("Cube"), TEXT("CuttingEdge"), Tool, Lip + FVector(3, 0, 0),
+            {0.16, (2 * HalfWidth + 3) / 100, 0.065}, FRotator(-9, 0, 0));
+        return;
+    }
+
+    FSurface Teeth;
+    constexpr int32 ToothCount = 5;
+    for (int32 I = 0; I < ToothCount; ++I)
+    {
+        const double Y = (I - (ToothCount - 1) * 0.5) * HalfWidth * 0.37;
+        const FVector Back = Lip + FVector(27, Y, 1);
+        const FVector Tip = Lip + FVector(-2, Y, 0);
+        const FVector A = Back + FVector(0, -8, 5), B = Back + FVector(0, 8, 5);
+        const FVector C = Tip + FVector(0, 5, 2), D = Tip + FVector(0, -5, 2);
+        const FVector E = Back + FVector(0, -8, -6), F = Back + FVector(0, 8, -6);
+        const FVector G = Tip + FVector(0, 5, -1), H = Tip + FVector(0, -5, -1);
+        Teeth.Quad(A, B, C, D, FVector::UpVector);
+        Teeth.Quad(E, F, G, H, -FVector::UpVector);
+        Teeth.Quad(A, D, H, E, -FVector::RightVector);
+        Teeth.Quad(B, C, G, F, FVector::RightVector);
+        Teeth.Quad(A, B, F, E, FVector::ForwardVector);
+        Teeth.Quad(D, C, G, H, -FVector::ForwardVector);
+    }
+    auto* Mesh = Skin(*this, Tool);
+    Teeth.Apply(*Mesh, 0, TEXT("CuttingEdge"));
+    Mesh->RegisterComponent();
+}
+
+void AMudMachine::BuildLoaderBody(const TCHAR* Paint)
+{
+    auto* Front = GetRootComponent();
+    const FVector2D Hood[] = {{-294, 86}, {-55, 86}, {-35, 111}, {-70, 178},
+        {-240, 173}, {-287, 151}};
+    BevelBody(RearFrame, Paint, Hood, 0, 95, 15);
+    BuildCab(RearFrame, TEXT("Chassis"), {-56, 0, 139}, {126, 154, 164}, 13);
+    Part(TEXT("Cube"), TEXT("Chassis"), RearFrame, {-294, 0, 122}, {0.085, 1.62, 0.54});
+    MachineMark(*this, RearFrame, TEXT("VOLVO"), {-300, 0, 125}, 180, 17);
+    Part(TEXT("Cylinder"), TEXT("Chassis"), RearFrame, {-123, 48, 198}, {0.16, 0.16, 0.67});
+    const FVector2D LiftArm[] = {{-18, -17}, {151, -24}, {222, -16},
+        {233, 0}, {215, 18}, {89, 31}, {-18, 16}};
+    for (const double Side : {-1.0, 1.0})
+    {
+        BevelBody(BoomPivot, Paint, LiftArm, Side * 48, 9, 4);
+        Part(TEXT("Cube"), TEXT("Chassis"), Front, {107, Side * 55, 108}, {0.84, 0.16, 0.92});
+        Part(TEXT("Cube"), TEXT("Headlight"), Front, {143, Side * 58, 154}, {0.09, 0.21, 0.13});
+        Part(TEXT("Cube"), TEXT("Chassis"), RearFrame, {-154, Side * 126, 142}, {1.04, 0.47, 0.10});
+        Part(TEXT("Cube"), TEXT("Steel"), RearFrame, {-20, Side * 92, 103}, {0.33, 0.28, 0.075});
+        MachineMark(*this, RearFrame, TEXT("L120H"), {-208, Side * 97, 137}, Side * 90, 15, FColor(34, 37, 39));
+    }
+    Part(TEXT("Cylinder"), TEXT("Steel"), Tool, {0, 0, 6}, {0.25, 0.25, 1.10}, FRotator(0, 0, 90));
+}
+
 void AMudMachine::BuildHaulerBody(const TCHAR* Paint)
 {
     auto* Root = GetRootComponent();
     const bool bDumper = Kind == EMudMachine::Dumper;
     if (bDumper)
     {
-        const FVector2D Nose[] = {{222, 113}, {315, 113}, {326, 139}, {313, 190}, {230, 211}, {204, 178}};
-        BevelBody(Root, Paint, Nose, 0, 112, 12);
-        BuildCab(Root, Paint, {166, 0, 149}, {153, 202, 151}, 26);
+        const FVector2D Nose[] = {{202, 111}, {317, 111}, {329, 135}, {317, 177}, {225, 198}, {198, 180}};
+        BevelBody(Root, Paint, Nose, 0, 106, 16);
+        BuildCab(Root, TEXT("Chassis"), {180, 0, 146}, {150, 204, 157}, 29);
     }
     else
     {
-        const FVector2D Nose[] = {{213, 110}, {314, 110}, {327, 132}, {309, 183}, {286, 209}, {218, 219}};
-        BevelBody(Root, Paint, Nose, 0, 79, 10);
-        BuildCab(Root, Paint, {173, 0, 116}, {152, 218, 186}, 15);
+        BuildCab(Root, Paint, {203, 0, 118}, {200, 228, 209}, 22);
+        // The cab-over FMX has a shallow steel bumper and a stacked grille below the windshield.
+        Part(TEXT("Cube"), TEXT("Chassis"), Root, {302, 0, 124}, {0.32, 2.59, 0.37});
+        Part(TEXT("Cube"), TEXT("Chassis"), Root, {304, 0, 165}, {0.105, 1.57, 0.35});
+        Part(TEXT("Cube"), TEXT("Steel"), Root, {310, 0, 166}, {0.019, 1.39, 0.045}, FRotator(0, 0, 15));
+        MachineMark(*this, Root, TEXT("VOLVO"), {311, 0, 186}, 0, 14);
     }
-    Part(TEXT("Cube"), TEXT("Chassis"), Root, {324, 0, 103}, {0.18, 2.64, 0.24});
-    Part(TEXT("Cube"), TEXT("Chassis"), Root, {320, 0, 152}, {0.13, 1.34, 0.45}, FRotator(-9, 0, 0));
+
     TArray<FTransform> Grille;
     for (int32 I = 0; I < 8; ++I)
-        Grille.Emplace(FRotator(-9, 0, 0), FVector(328 - I * 0.8, 0, 133 + I * 5.2), FVector(0.027, 1.24, 0.016));
+    {
+        const FVector Offset = bDumper ? FVector(329 - I * 1.7, 0, 126 + I * 5.2) : FVector(311, 0, 149 + I * 4.15);
+        Grille.Emplace(FRotator::ZeroRotator, Offset, FVector(0.027, 1.24, 0.016));
+    }
     RepeatedBoxes(TEXT("Steel"), Root, Grille);
+    if (bDumper)
+    {
+        Part(TEXT("Cube"), TEXT("Chassis"), Root, {321, 0, 103}, {0.23, 2.56, 0.23});
+        Part(TEXT("Cube"), TEXT("Chassis"), Root, {318, 0, 146}, {0.095, 1.41, 0.47}, FRotator(-17, 0, 0));
+        MachineMark(*this, Root, TEXT("VOLVO"), {319, 0, 169}, 0, 15);
+    }
     for (const double Side : {-1.0, 1.0})
     {
-        Part(TEXT("Cube"), Paint, Root, {185, Side * 126, 130}, {0.85, 0.55, 0.11});
-        Part(TEXT("Cube"), Paint, Root, {130, Side * 126, 118}, {0.40, 0.55, 0.10}, FRotator(32, 0, 0));
-        Part(TEXT("Cube"), Paint, Root, {240, Side * 126, 118}, {0.40, 0.55, 0.10}, FRotator(-32, 0, 0));
-        Part(TEXT("Cube"), TEXT("Headlight"), Root, {331, Side * 99, 115}, {0.10, 0.33, 0.13});
-        Part(TEXT("Cube"), TEXT("AmberLamp"), Root, {327, Side * 121, 115}, {0.10, 0.088, 0.13});
+        const TCHAR* Fender = bDumper ? Paint : TEXT("Chassis");
+        Part(TEXT("Cube"), Fender, Root, {185, Side * 126, 137}, {0.85, 0.55, 0.11});
+        Part(TEXT("Cube"), Fender, Root, {130, Side * 126, 124}, {0.40, 0.55, 0.10}, FRotator(32, 0, 0));
+        Part(TEXT("Cube"), Fender, Root, {240, Side * 126, 124}, {0.40, 0.55, 0.10}, FRotator(-32, 0, 0));
+        if (bDumper)
+        {
+            const FVector2D Intake[] = {{247, 153}, {312, 135}, {319, 150}, {309, 167}, {253, 177}};
+            BevelBody(Root, TEXT("Chassis"), Intake, Side * 106, 2.4, 0.8);
+            Part(TEXT("Cube"), Paint, Root, {282, Side * 109, 155}, {0.67, 0.017, 0.033}, FRotator(-12, 0, 0));
+            Part(TEXT("Cube"), TEXT("Ochre"), Root, {107, Side * 107, 183}, {0.044, 0.044, 0.92});
+            Part(TEXT("Cube"), TEXT("Ochre"), Root, {107, Side * 127, 228}, {0.044, 0.44, 0.044});
+            Part(TEXT("Cube"), TEXT("Headlight"), Root, {332, Side * 98, 111}, {0.055, 0.29, 0.10});
+            Part(TEXT("Cube"), TEXT("AmberLamp"), Root, {330, Side * 117, 111}, {0.055, 0.073, 0.10});
+        }
+        else
+        {
+            Part(TEXT("Cube"), TEXT("Rubber"), Root, {320, Side * 99, 126}, {0.045, 0.41, 0.26});
+            Part(TEXT("Cube"), TEXT("Headlight"), Root, {323, Side * 91, 124}, {0.02, 0.19, 0.037}, FRotator(0, 0, Side * 32));
+            Part(TEXT("Cube"), TEXT("Headlight"), Root, {323, Side * 107, 124}, {0.02, 0.19, 0.037}, FRotator(0, 0, -Side * 32));
+            MachineMark(*this, Root, TEXT("FMX"), {247, Side * 115, 166}, Side * 90, 12);
+        }
         Part(TEXT("Cube"), TEXT("Steel"), Root, {102, Side * 123, 111}, {0.32, 0.24, 0.07});
         Part(TEXT("Cube"), TEXT("Steel"), Root, {99, Side * 126, 92}, {0.28, 0.20, 0.07});
         Part(TEXT("Cube"), TEXT("Chassis"), Root, {205, Side * 120, 243}, {0.055, 0.62, 0.05});
@@ -379,13 +579,26 @@ void AMudMachine::BuildHaulerBody(const TCHAR* Paint)
 
     auto* BedFrame = RearFrame ? RearFrame.Get() : Root;
     Part(TEXT("Cube"), TEXT("WornSteel"), TipBed, {189, 0, 0}, {3.82, 2.39, 0.16});
-    Part(TEXT("Cube"), Paint, TipBed, {373, 0, 44}, {0.16, 2.57, 0.91});
+    Part(TEXT("Cube"), Paint, TipBed, {373, 0, bDumper ? 57.0 : 44.0}, {0.16, 2.57, bDumper ? 1.16 : 0.91});
+    if (bDumper)
+        Part(TEXT("Cube"), Paint, TipBed, {385, 0, 112}, {0.58, 2.59, 0.09}, FRotator(-5, 0, 0));
     for (const double Side : {-1.0, 1.0})
     {
-        const FVector2D Wall[] = {{1, 7}, {364, 7}, {370, 87}, {63, 83}, {16, 59}};
+        const FVector2D Wall[] = {{1, 7}, {364, 7}, {370, bDumper ? 101.0 : 87.0}, {63, 83}, {16, 59}};
         BevelBody(TipBed, Paint, Wall, Side * 122, 8, 3);
-        for (const double X : {86.0, 172.0, 258.0, 343.0})
-            Part(TEXT("Cube"), Paint, TipBed, {X, Side * 134, 41}, {0.13, 0.09, 0.64}, FRotator(15, 0, 0));
+        if (bDumper)
+        {
+            Part(TEXT("Cube"), Paint, TipBed, {201, Side * 131, 22}, {3.15, 0.10, 0.14});
+            Part(TEXT("Cube"), TEXT("Chassis"), TipBed, {207, Side * 131, 58}, {1.73, 0.038, 0.36});
+            MachineMark(*this, TipBed, TEXT("VOLVO  A30G"), {207, Side * 134, 58}, Side * 90, 20);
+        }
+        else
+        {
+            TArray<FTransform> Stiffeners;
+            for (const double X : {86.0, 172.0, 258.0, 343.0})
+                Stiffeners.Emplace(FRotator(15, 0, 0), FVector(X, Side * 134, 41), FVector(0.13, 0.09, 0.64));
+            RepeatedBoxes(Paint, TipBed, Stiffeners);
+        }
         Part(TEXT("Cube"), TEXT("Chassis"), BedFrame, {-298, Side * 108, 100}, {0.16, 0.41, 0.22});
         Part(TEXT("Cube"), TEXT("RedLamp"), BedFrame, {-308, Side * 110, 103}, {0.07, 0.30, 0.12});
     }

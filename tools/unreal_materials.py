@@ -44,7 +44,14 @@ class Graph:
             self.material = asset_tools.create_asset(name, FOLDER, unreal.Material, unreal.MaterialFactoryNew())
         if self.material is None:
             raise RuntimeError(f"Could not create {name}")
-        EDIT.delete_all_material_expressions(self.material)
+        # Unreal removes nodes while iterating the expression list and can skip some.
+        remaining = EDIT.get_num_material_expressions(self.material)
+        while remaining:
+            EDIT.delete_all_material_expressions(self.material)
+            count = EDIT.get_num_material_expressions(self.material)
+            if count >= remaining:
+                raise RuntimeError(f"{name}: could not clear the existing material graph")
+            remaining = count
 
     def node(self, kind, **properties):
         expression = EDIT.create_material_expression(self.material, getattr(unreal, "MaterialExpression" + kind), 0, 0)
@@ -123,19 +130,26 @@ def make_ground(asset_tools, surfaces):
     gravel = g.surface(surfaces["Gravel"], g.uv(0.82))
     bare = blend(g, soil, mud, wetness)
     color, normal, roughness = blend(g, blend(g, bare, turf, grass), gravel, aggregate)
+    work = g.node("TextureCoordinate", coordinate_index=1)
+    cut = g.node("ComponentMask", r=True, g=False, b=False, a=False)
+    fill = g.node("ComponentMask", r=False, g=True, b=False, a=False)
+    g.connect(work, cut, "")
+    g.connect(work, fill, "")
+    color = g.lerp(color, g.multiply(color, g.color((0.80, 0.67, 0.54))), cut)
+    color = g.lerp(color, g.multiply(color, g.color((1.18, 1.065, 0.89))), fill)
     patch_tone = g.lerp(g.scalar(0.61), g.scalar(1.17), variation)
     g.bind(g.multiply(color, patch_tone), PROPERTY.MP_BASE_COLOR)
     g.bind(normal, PROPERTY.MP_NORMAL)
     # The wet scan supplies the darker color. Water also lowers the surface roughness.
     dampness = g.lerp(g.scalar(1.04), g.scalar(0.67), wetness)
-    g.bind(g.multiply(roughness, dampness), PROPERTY.MP_ROUGHNESS)
+    broken_surface = g.lerp(g.scalar(1.0), g.scalar(1.16), fill)
+    g.bind(g.multiply(g.multiply(roughness, dampness), broken_surface), PROPERTY.MP_ROUGHNESS)
     g.finish()
 
 
 def make_cargo(asset_tools, name, maps, tint, scale):
     g = Graph(asset_tools, name)
-    if name == "Loose":
-        g.enable_instances()
+    g.enable_instances()
     color, relief, roughness = g.surface(maps, g.uv(scale))
     g.bind(g.multiply(color, g.color(tint)), PROPERTY.MP_BASE_COLOR)
     g.bind(relief, PROPERTY.MP_NORMAL)
@@ -145,13 +159,22 @@ def make_cargo(asset_tools, name, maps, tint, scale):
 
 def water_texture():
     size = 256
+    # Several directions and wavelengths break up the repeating highlights at the ford.
+    ripples = (
+        (1, 3, 0.031, 0.3),
+        (-2, 5, 0.018, 1.1),
+        (4, 3, 0.010, 2.7),
+        (3, -7, 0.009, 2.0),
+        (-6, 8, 0.005, 0.6),
+        (11, 7, 0.003, 1.4),
+    )
     rows = bytearray()
     for y in range(size):
         rows.append(0)
         for x in range(size):
             u, v = x * math.tau / size, y * math.tau / size
             dx, dy = 0.0, 0.0
-            for i, j, strength, phase in ((2, 5, 0.039, 0.0), (5, -3, 0.023, 2.0), (11, 7, 0.008, 1.4)):
+            for i, j, strength, phase in ripples:
                 wave = math.cos(i * u + j * v + phase) * strength
                 dx -= i * wave
                 dy -= j * wave
@@ -186,26 +209,27 @@ def make_water(asset_tools):
     waves_b = g.sample(waves, fine, normal=True)
     g.bind(g.lerp(waves_a, waves_b, g.scalar(0.33)), PROPERTY.MP_NORMAL)
     g.bind(g.color((0.025, 0.042, 0.043)), PROPERTY.MP_BASE_COLOR)
-    g.bind(g.scalar(0.19), PROPERTY.MP_ROUGHNESS)
+    g.bind(g.scalar(0.26), PROPERTY.MP_ROUGHNESS)
     g.bind(g.scalar(0.16), PROPERTY.MP_OPACITY)
     g.finish()
 
 
 def make_palette(asset_tools, mud_maps):
     palette = {
-        "Pine": ((0.025, 0.104, 0.044), 0.89, 0),
-        "Bark": ((0.094, 0.048, 0.029), 0.91, 0),
-        "Ochre": ((0.31, 0.141, 0.027), 0.49, 0.0),
-        "Amber": ((0.40, 0.191, 0.032), 0.47, 0.0),
-        "Teal": ((0.055, 0.24, 0.19), 0.43, 0.0),
-        "Rubber": ((0.028, 0.030, 0.030), 0.90, 0),
-        "Tyre": ((0.028, 0.030, 0.030), 0.89, 0.0),
-        "Chassis": ((0.044, 0.048, 0.047), 0.64, 0.22),
+        "Pine": ((0.032, 0.095, 0.042), 0.91, 0),
+        "Bark": ((0.088, 0.051, 0.032), 0.91, 0),
+        "Meadow": ((0.11, 0.17, 0.052), 0.91, 0),
+        "Ochre": ((0.42, 0.20, 0.020), 0.48, 0.0),
+        "Amber": ((0.52, 0.28, 0.024), 0.43, 0.0),
+        "Teal": ((0.195, 0.275, 0.055), 0.41, 0.0),
+        "Rubber": ((0.018, 0.020, 0.021), 0.88, 0.0),
+        "Tyre": ((0.021, 0.023, 0.024), 0.81, 0.0),
+        "Chassis": ((0.052, 0.056, 0.057), 0.60, 0.16),
         "Steel": ((0.22, 0.23, 0.24), 0.51, 0.77),
-        "WornSteel": ((0.18, 0.17, 0.15), 0.57, 0.68),
-        "CuttingEdge": ((0.35, 0.36, 0.37), 0.39, 0.88),
+        "WornSteel": ((0.135, 0.13, 0.122), 0.62, 0.71),
+        "CuttingEdge": ((0.32, 0.33, 0.34), 0.34, 0.90),
         "CylinderRod": ((0.52, 0.56, 0.60), 0.20, 0.96),
-        "Glass": ((0.018, 0.037, 0.045), 0.19, 0.0),
+        "Glass": ((0.014, 0.025, 0.031), 0.19, 0.0),
         "GoldMarker": ((0.76, 0.48, 0.026), 0.55, 0),
         "RedMarker": ((0.80, 0.11, 0.04), 0.55, 0),
         "Headlight": ((0.86, 0.80, 0.64), 0.31, 0.2),
@@ -214,18 +238,21 @@ def make_palette(asset_tools, mud_maps):
     }
     dirt = {
         "Ochre": (0.12, 0.30), "Amber": (0.10, 0.23), "Teal": (0.13, 0.29),
-        "Chassis": (0.09, 0.31), "Tyre": (0.10, 0.42), "WornSteel": (0.19, 0.51),
+        "Chassis": (0.09, 0.31), "Tyre": (0.08, 0.37), "WornSteel": (0.19, 0.51),
     }
     for name, (color, roughness, metallic) in palette.items():
         g = Graph(asset_tools, name)
-        if name in ("Pine", "Bark", "Rubber", "Tyre", "Steel", "WornSteel"):
+        if name in ("Pine", "Bark", "Meadow", "Ochre", "Teal", "Rubber", "Tyre", "Steel", "WornSteel", "CuttingEdge"):
             g.enable_instances()
         base = g.color(color)
         rough = g.scalar(roughness)
         metal = g.scalar(metallic)
         if name == "Pine":
-            shade = g.lerp(g.scalar(0.72), g.scalar(1.37), g.node("PerInstanceRandom"))
-            base = g.multiply(base, shade)
+            base = g.lerp(g.multiply(base, g.scalar(0.52)), g.color((0.084, 0.123, 0.045)),
+                          g.node("PerInstanceRandom"))
+        if name == "Meadow":
+            g.material.set_editor_property("two_sided", True)
+            base = g.lerp(base, g.color((0.24, 0.215, 0.071)), g.node("PerInstanceRandom"))
         if name in dirt:
             low, high = dirt[name]
             mud, normal, mask = g.surface(mud_maps, g.uv(1.65))

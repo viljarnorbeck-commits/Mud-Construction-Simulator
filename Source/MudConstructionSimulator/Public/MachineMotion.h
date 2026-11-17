@@ -5,6 +5,42 @@
 
 namespace MachineMotion
 {
+struct HydraulicInput
+{
+    double Boom = 0;
+    double Stick = 0;
+    double Curl = 0;
+    double Swing = 0;
+};
+
+enum class MouseTool { Excavator, Blade, Loader };
+
+// Unreal sends positive Y for upward mouse motion.
+inline void AccumulateMouseDrag(HydraulicInput& Input, bool Left, bool Right, MouseTool Tool, double X, double Y)
+{
+    if (!Left && !Right)
+        return;
+    if (Tool == MouseTool::Blade)
+    {
+        Input.Boom += Y;
+        return;
+    }
+    if (Left)
+        Input.Boom += Y;
+    if (Tool == MouseTool::Loader)
+    {
+        if (Right)
+            Input.Curl += Y;
+        return;
+    }
+    if (Right)
+        Input.Swing += X;
+    if (Left && !Right)
+        Input.Stick += X;
+    if (Right && !Left)
+        Input.Curl += Y;
+}
+
 inline double Approach(double Current, double Target, double MaxRate, double Dt, double Response)
 {
     const double Difference = Target - Current;
@@ -26,4 +62,45 @@ inline double HydraulicTravel(double& Rate, double TargetRate, double Dt, double
         Rate = TargetRate;
     return Travel;
 }
+
+struct TipControl
+{
+    double Angle = 0;
+    double ManualTarget = 0;
+    bool Manual = false;
+
+    void Step(double Input, bool Automatic, double Dt)
+    {
+        if (std::abs(Input) > 0.08)
+        {
+            if (!Manual)
+                ManualTarget = Angle;
+            Manual = true;
+            ManualTarget = std::clamp(ManualTarget + std::clamp(Input, -1.0, 1.0) * 40 * Dt, 0.0, 51.0);
+        }
+        const double Target = Manual ? ManualTarget : (Automatic ? 51.0 : 0.0);
+        Angle = Approach(Angle, Target, Target > Angle ? 42.0 : 58.0, Dt, 0.15);
+        if (Target == 0 && Angle < 0.12)
+            Angle = 0;
+    }
+
+    bool CanSpill(bool Automatic) const { return (Manual || Automatic) && Angle >= 25; }
+};
+
+struct DirectionalTap
+{
+    double Positive = 0;
+    double Negative = 0;
+
+    void Press(bool Forward) { (Forward ? Positive : Negative) = 0.08; }
+
+    double Resolve(double Axis, double Dt)
+    {
+        // Keyboard transitions can occur between two samples of the continuous axis.
+        const double Tap = static_cast<double>(Positive > 0) - static_cast<double>(Negative > 0);
+        Positive = std::max(0.0, Positive - Dt);
+        Negative = std::max(0.0, Negative - Dt);
+        return Axis != 0 ? Axis : Tap;
+    }
+};
 }
