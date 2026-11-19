@@ -78,13 +78,48 @@ def spoil_clump():
     return vertices, faces
 
 
-def import_mesh(asset_tools, directory, name, mesh):
-    vertices, faces = mesh
+def quarry_fragment():
+    bottom = [(-43, -28, -9), (16, -39, -14), (44, -12, -8),
+              (36, 26, -11), (-12, 40, -14), (-46, 16, -6)]
+    crown = [(-29, -23, 20), (11, -27, 28), (32, -9, 17),
+             (20, 19, 23), (-11, 27, 35), (-32, 13, 17)]
+    ring = len(bottom)
+    faces = [(0, i + 1, i) for i in range(1, ring - 1)]
+    faces += [(ring, ring + i, ring + i + 1) for i in range(1, ring - 1)]
+    for i in range(ring):
+        j = (i + 1) % ring
+        faces.extend(((i, j, j + ring), (i, j + ring, i + ring)))
+    return bottom + crown, faces
+
+
+def cargo_surface():
+    vertices, faces, uvs = [], [], []
+    columns, rows = 29, 21
+    for row in range(rows):
+        for column in range(columns):
+            u, v = column / (columns - 1), row / (rows - 1)
+            x, y = u - 0.5, v - 0.5
+            profile = max(0.0, 1.0 - abs(x * 2) ** 2.8 - abs(y * 2) ** 2.2)
+            shape = 0.70 + 0.055 * math.sin(x * 19 + y * 12) + 0.035 * math.sin(x * 31 - y * 22)
+            vertices.append((x * 100, y * 100, 100 * profile ** 0.87 * shape))
+            uvs.append((u, v))
+            if row and column:
+                index = row * columns + column
+                faces.extend(((index - columns - 1, index - columns, index - 1),
+                              (index - columns, index, index - 1)))
+    return vertices, faces, uvs
+
+
+def import_mesh(asset_tools, directory, name, mesh, smooth=False):
+    vertices, faces, *uvs = mesh
     # Unreal's OBJ translator flips Y. Keep every mesh pivot at ground level.
     lines = [f"o {name}"]
     lines.extend(f"v {x:.4f} {-y:.4f} {z:.4f}" for x, y, z in vertices)
     max_height = max(z for _, _, z in vertices)
-    lines.extend(f"vt {(x + 240) / 480:.4f} {z / max_height:.4f}" for x, _, z in vertices)
+    coordinates = uvs[0] if uvs else [((x + 240) / 480, z / max_height) for x, _, z in vertices]
+    lines.extend(f"vt {u:.4f} {v:.4f}" for u, v in coordinates)
+    if smooth:
+        lines.append("s 1")
     # MeshDescription computes the face normal with the reversed cross product.
     lines.extend("f " + " ".join(f"{index + 1}/{index + 1}" for index in reversed(face)) for face in faces)
     file = directory / f"{name}.obj"
@@ -128,3 +163,5 @@ def build_spoil(asset_tools):
     unreal.SystemLibrary.execute_console_command(None, "Interchange.FeatureFlags.Import.SyncToBrowser 0")
     with tempfile.TemporaryDirectory(prefix="MudSpoil-") as folder:
         import_mesh(asset_tools, Path(folder), "SpoilClump", spoil_clump())
+        import_mesh(asset_tools, Path(folder), "QuarryFragment", quarry_fragment())
+        import_mesh(asset_tools, Path(folder), "CargoSurface", cargo_surface(), smooth=True)

@@ -105,3 +105,7 @@ Fristående test av massbalans, last och bärighet kan köras med en C++17-kompi
 c++ -std=c++17 -ISource/MudConstructionSimulator/Public tests/earthwork.cpp -o /tmp/mud-earthwork
 /tmp/mud-earthwork
 ```
+
+## Markfysik och testmiljö
+
+Se [SOIL_SIMULATION.md](SOIL_SIMULATION.md) för arkitektur, testresultat, kvarvarande begränsningar och hur marklabbet startas.

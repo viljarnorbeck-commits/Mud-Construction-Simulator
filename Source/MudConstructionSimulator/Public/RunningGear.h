@@ -55,22 +55,97 @@ struct TrackPressure
     double Depth;
 };
 
-inline double ContactSink(double Softness, double Wetness, double LoadFraction, bool Tracked)
+struct SoilContact
+{
+    double Sink = 0;
+    double Shear = 0;
+    bool Initialized = false;
+
+    void Advance(double EquilibriumSink, double SlipSpeed, double GroundSpeed, double Dt)
+    {
+        if (!Initialized)
+        {
+            Sink = EquilibriumSink;
+            Initialized = true;
+        }
+        // Slip remoulds wet soil. Travelling brings fresh ground into the contact patch.
+        const double Churning = std::abs(SlipSpeed) / 0.65;
+        const double Renewal = std::abs(GroundSpeed) / 1.25 + 0.03;
+        const double Rate = Churning + Renewal;
+        Shear += (Churning / Rate - Shear) * (1.0 - std::exp(-Rate * Dt));
+        const double Target = EquilibriumSink * (1.0 + 0.30 * Shear);
+        const double Response = Target > Sink ? 0.9 / (1.0 + std::abs(SlipSpeed) * 0.6) : 0.18;
+        Sink += (Target - Sink) * (1.0 - std::exp(-Dt / Response));
+    }
+};
+
+struct SoilDrivetrain
+{
+    double WheelSpeed = 0;
+
+    double Advance(double Speed, double Throttle, double SpeedLimit, double Grip, double Sink,
+        double Radius, double MassRatio, double Grade, bool Tracked, bool Brake, double Dt)
+    {
+        if (Dt <= 0)
+            return Speed;
+        const double Gravity = 9.81;
+        const double SlopeNormal = 1.0 / std::sqrt(1.0 + Grade * Grade);
+        const double Immersion = Sink / std::max(0.25, Radius);
+        // Once the chassis bears on the mud, less of its weight loads the driven tyres.
+        const double BellyDepth = std::max(0.0, Immersion - (Tracked ? 0.80 : 0.58));
+        const double SupportedWeight = std::clamp(1.0 - BellyDepth * 1.6, 0.12, 1.0);
+        const double Friction = std::clamp(Grip, 0.02, 1.0) * Gravity * SlopeNormal * SupportedWeight;
+        const double Compaction = Immersion * Immersion * (Tracked ? 6.0 : 10.0);
+        const double Suction = Sink * 1.4 / (1.0 + std::abs(Speed) * 2.0);
+        const double Resistance = 0.025 * Gravity + Compaction + Suction + BellyDepth * 9.0;
+        const double Downhill = -Gravity * Grade * SlopeNormal;
+
+        constexpr double WheelInertia = 0.10;
+        const double Target = Throttle * SpeedLimit * (Throttle < 0 ? 0.48 : 1.0);
+        const double Pull = (Tracked ? 4.8 : 4.0) * MassRatio / (1.0 + std::abs(WheelSpeed) / 7.0);
+        const double Motor = std::abs(Throttle) > 0.01 ?
+            std::clamp((Target - WheelSpeed) * 2.5, -Pull, Pull) : -WheelSpeed * 0.35;
+        double FreeWheel = WheelSpeed + Motor * Dt / WheelInertia;
+        if (Brake)
+            FreeWheel = 0;
+        // Implicit coupling of wheel inertia and chassis mass keeps grip stable at small slip.
+        const double Coupling = 0.035 + Dt * (1.0 + 1.0 / WheelInertia);
+        const double RequestedTraction = Brake ? -Speed / Dt - Downhill : (FreeWheel - Speed) / Coupling;
+        const double Traction = std::clamp(RequestedTraction, -Friction, Friction);
+        WheelSpeed = Brake ? 0 : FreeWheel - Traction * Dt / WheelInertia;
+        const double FreeSpeed = Speed + (Traction + Downhill) * Dt;
+        return std::copysign(std::max(0.0, std::abs(FreeSpeed) - Resistance * Dt), FreeSpeed);
+    }
+};
+
+inline double ContactSink(double Softness, double Wetness, double LoadFraction, bool Tracked, double Wear = 0)
 {
     const double Saturation = std::clamp((Wetness - 0.20) / 0.80, 0.0, 1.0);
     const double Load = std::clamp(LoadFraction, 0.0, 1.0);
-    return Softness * Saturation * Saturation * (Tracked ? 0.13 + Load * 0.13 : 0.23 + Load * 0.32);
+    const double Loose = std::clamp(Wear, 0.0, 1.0);
+    const double Yield = Tracked ? 0.09 + Load * 0.085 + Loose * 0.09 : 0.17 + Load * 0.19 + Loose * 0.27;
+    return Softness * Saturation * Saturation * Yield;
+}
+
+inline double MudMobility(double Sink, double Grip, double LoadFraction, bool Tracked, bool Reverse)
+{
+    const double Resistance = Sink * (1.14 - 0.38 * std::clamp(Grip, 0.0, 1.0));
+    const double Limit = (Tracked ? 0.40 : 0.34) - 0.065 * std::clamp(LoadFraction, 0.0, 1.0)
+        + (Reverse ? 0.065 : 0.0);
+    const double Free = std::clamp((Limit - Resistance) / (Limit - 0.065), 0.0, 1.0);
+    return Free * Free * (3.0 - 2.0 * Free);
 }
 
 inline TrackPressure PressGround(int CurrentWear, double Contact, double Softness, double Wet, double Scrub,
     bool Tracked, double LoadFactor = 1)
 {
-    const int Limit = Tracked ? static_cast<int>(std::lround(150 + Scrub * 105)) : static_cast<int>(120 + Scrub * 73);
+    const int Limit = Tracked ? static_cast<int>(std::lround(150 + Scrub * 105)) :
+        static_cast<int>(135 + Scrub * 120);
     const int Gain = static_cast<int>(std::lround(Contact * LoadFactor * (Tracked ? 50 + 68 * Scrub : 29 + 39 * Scrub) *
         (0.3 + Wet * 0.7) * (0.38 + Softness * 0.62)));
     const int Applied = std::clamp(Gain, 0, std::max(0, Limit - CurrentWear));
     const double Depth = (Applied / 255.0) * Softness *
-        (Tracked ? 0.055 + Wet * 0.17 + Scrub * (0.14 + Wet * 0.20) : 0.025 + Wet * 0.16 + Scrub * Wet * 0.15);
+        (Tracked ? 0.055 + Wet * 0.17 + Scrub * (0.14 + Wet * 0.20) : 0.035 + Wet * 0.26 + Scrub * Wet * 0.30);
     return {CurrentWear + Applied, Depth};
 }
 

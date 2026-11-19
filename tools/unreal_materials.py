@@ -150,14 +150,27 @@ def make_ground(asset_tools, surfaces):
     g.finish()
 
 
-def make_cargo(asset_tools, name, maps, tint, scale):
+def make_cargo(asset_tools, name, maps, tint, scale, instanced=True):
     g = Graph(asset_tools, name)
-    g.enable_instances()
+    if instanced:
+        g.enable_instances()
     color, relief, roughness = g.surface(maps, g.uv(scale))
     g.bind(g.multiply(color, g.color(tint)), PROPERTY.MP_BASE_COLOR)
     g.bind(relief, PROPERTY.MP_NORMAL)
     g.bind(roughness, PROPERTY.MP_ROUGHNESS)
     g.finish()
+
+
+def make_cargo_materials(asset_tools, surfaces):
+    for material, deposit, maps, tint, scale in (
+        ("Loose", "PayloadSoil", surfaces["Soil"], (0.91, 0.69, 0.47), 3.1),
+        ("LooseGravel", "PayloadGravel", surfaces["Gravel"], (1.24, 1.17, 1.03), 3.2),
+        ("LooseRock", "PayloadRock", surfaces["Gravel"], (0.51, 0.63, 0.73), 1.5),
+        ("LooseSand", "PayloadSand", surfaces["Soil"], (1.40, 1.12, 0.70), 5.5),
+        ("LooseClay", "PayloadClay", surfaces["Soil"], (0.66, 0.45, 0.35), 2.5),
+    ):
+        make_cargo(asset_tools, material, maps, tint, scale)
+        make_cargo(asset_tools, deposit, maps, tint, scale, instanced=False)
 
 
 def water_texture():
@@ -343,9 +356,7 @@ def build_materials(asset_tools):
         for name in ("Soil", "Mud", "Grass", "Gravel")
     }
     make_ground(asset_tools, surfaces)
-    make_cargo(asset_tools, "Loose", surfaces["Soil"], (0.84, 0.70, 0.54), 2.8)
-    make_cargo(asset_tools, "LooseGravel", surfaces["Gravel"], (1.11, 1.05, 0.95), 2.4)
-    make_cargo(asset_tools, "LooseRock", surfaces["Gravel"], (0.68, 0.77, 0.81), 1.3)
+    make_cargo_materials(asset_tools, surfaces)
     make_water(asset_tools)
     make_palette(asset_tools, surfaces["Mud"])
     make_cab_glazing(asset_tools)

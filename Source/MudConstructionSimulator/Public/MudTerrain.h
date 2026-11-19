@@ -33,6 +33,29 @@ class AMudTerrain : public AActor
     GENERATED_BODY()
 
 public:
+    struct FMudRoadSection
+    {
+        bool bDeep = false;
+        bool bSoft = false;
+        bool bRough = false;
+
+        bool IsReady() const { return !bDeep && !bSoft && !bRough; }
+    };
+
+    struct FMudRoadSurvey
+    {
+        FVector2D Start = FVector2D::ZeroVector;
+        TArray<FMudRoadSection> Sections;
+        int32 Ready = 0;
+        int32 Deep = 0;
+        int32 Soft = 0;
+        int32 Rough = 0;
+        double Fill = 0;
+
+        bool IsReady() const { return !Sections.IsEmpty() && Ready == Sections.Num(); }
+        int32 Progress() const { return Sections.IsEmpty() ? 0 : Ready * 100 / Sections.Num(); }
+    };
+
     AMudTerrain();
     bool Initialize();
     double Height(FVector2D XY) const;
@@ -40,7 +63,7 @@ public:
     FVector Normal(FVector2D XY) const;
     double Wetness(FVector2D XY) const;
     double WaterDepth(FVector2D XY) const;
-    FVector RiverSoundPoint(double Y) const;
+    FVector WaterSoundPoint(FVector2D XY) const;
     double Grip(FVector2D XY) const;
     double ContactSink(FVector2D XY, bool bTracked, double LoadFraction) const;
     Earthwork::Material Surface(FVector2D XY) const;
@@ -48,9 +71,17 @@ public:
     Earthwork::Load CutPass(FVector2D XY, FVector2D Across, FVector2D Reach, double Amount, double ToolHeight,
         FVector2D Slopes = FVector2D::ZeroVector, bool bBladePass = false);
     Earthwork::Load DrawFromPile(const FMudPile& Pile, FVector2D Approach, double Amount);
+    Earthwork::Load SweepCut(FVector From, FVector To, FVector2D Across, FVector2D Reach, double Amount,
+        FVector2D Slopes = FVector2D::ZeroVector);
     void Deposit(FVector2D XY, double Radius, const Earthwork::Load& Load);
     void Pour(FVector Origin, FVector Direction, double Radius, const Earthwork::Load& Load);
     void AdvancePours(double Dt);
+    void AdvanceSoil(double Dt);
+    int32 ActiveSoilCells() const { return static_cast<int32>(SoilFlow.ActiveCells()); }
+    double SoilStepMilliseconds = 0;
+    double MaterialBalance() const;
+    double MaterialVolumeBalance() const;
+    bool IsSoilLab() const { return bSoilLab; }
     void SettlePours();
     void Spread(FVector2D XY, FVector2D Across, FVector2D Reach, const Earthwork::Load& Load);
     void PressTrack(FVector2D Center, FVector2D Forward, double HalfLength, double HalfWidth,
@@ -63,6 +94,10 @@ public:
     bool HitsTree(FVector2D XY, double Radius, bool bClear);
     double Remaining(const FMudPile& Pile) const;
     double EstimateFordFill(FVector2D Ford, double Clearance) const;
+    FMudRoadSurvey SurveyFordRoad(FVector2D Ford) const;
+    bool HasRoadContract() const { return bRoadContract; }
+    bool IsRoadReady() const;
+    const FMudRoadSurvey* GetRoadSurvey(int32 FordIndex) const;
     TSharedRef<FJsonObject> SaveTerrain() const;
     bool RestoreTerrain(const TSharedPtr<FJsonObject>& Data);
     int32 GetSeed() const { return Seed; }
@@ -77,6 +112,7 @@ private:
     static constexpr int32 TileSize = 64;
     static constexpr int32 CrownTiers = 3;
     static constexpr int32 RubbleRadius = 36;
+    static constexpr double CreekMargin = 5.0;
     struct FTree
     {
         FVector2D XY;
@@ -124,8 +160,17 @@ private:
     TArray<float> Original;
     TArray<float> Heights;
     TArray<FRiverSample> River;
+    TArray<FRiverSample> Creek;
+    TArray<FMudRoadSurvey> FordSurveys;
+    double NextFordSurvey = 0;
+    bool bRoadContract = false;
     TArray<FMudPit> Pits;
     TMap<int32, Earthwork::Column> Changed;
+    Earthwork::ActiveSoil SoilFlow;
+    TMap<int32, double> AccountedMass;
+    double MassDelta = 0;
+    bool bSoilLab = false;
+    void InitializeSoilLab();
     TMap<int32, float> WorkFinish;
     TMap<int32, uint8> TrackWear;
     TArray<FTree> Trees;
@@ -161,6 +206,9 @@ private:
     void ApplyFill(const TArray<TPair<int32, double>>& Area, const Earthwork::Load& Load);
     void LandPour(FVector2D Contact, FPour& Pour);
     FRiverSample RiverAt(double Y) const;
+    FRiverSample CreekAt(double X) const;
+    double AggregateCover(int32 Cell) const;
+    static FRiverSample SampleChannel(const TArray<FRiverSample>& Channel, double Row);
     void BuildTile(int32 Id, int32 Step);
     void BuildGroundCover();
     void UpdateGroundCover();
