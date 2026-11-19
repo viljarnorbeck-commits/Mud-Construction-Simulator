@@ -3,6 +3,7 @@
 
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/BoxComponent.h"
 #include "Engine/StaticMesh.h"
 #include "MachineMotion.h"
 #include "Materials/MaterialInterface.h"
@@ -90,6 +91,12 @@ const FVector AMudMachine::TruckBedHinge(-389, 0, 140);
 AMudMachine::AMudMachine()
 {
     RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("MachineRoot"));
+    EnvironmentCollider=CreateDefaultSubobject<UBoxComponent>(TEXT("EnvironmentContact"));
+    EnvironmentCollider->SetupAttachment(RootComponent);
+    EnvironmentCollider->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+    EnvironmentCollider->SetCollisionObjectType(ECC_WorldDynamic);
+    EnvironmentCollider->SetCollisionResponseToAllChannels(ECR_Ignore);
+    EnvironmentCollider->SetCollisionResponseToChannel(ECC_PhysicsBody,ECR_Block);
 }
 
 USceneComponent* AMudMachine::Pivot(USceneComponent* Parent, FVector Offset)
@@ -520,6 +527,8 @@ void AMudMachine::Initialize(EMudMachine Type, FVector2D Location, AMudTerrain& 
         return Part(TEXT("Cube"), Material, Parent, Offset, Size);
     };
     const TCHAR* Paint = Spec(Kind).Paint;
+    EnvironmentCollider->SetBoxExtent(FVector(Kind==EMudMachine::Truck?400:Kind==EMudMachine::Dumper?330:220,120,90));
+    EnvironmentCollider->SetRelativeLocation(FVector(0,0,130));
     auto* Root = GetRootComponent();
     const bool bTracked = Kind == EMudMachine::Excavator || Kind == EMudMachine::Dozer;
     if (Kind == EMudMachine::Dumper || Kind == EMudMachine::Loader)
@@ -877,11 +886,15 @@ void AMudMachine::Drive(double Dt, double Throttle, double Steering, bool bBrake
             Next += (CurrentForward - NewForward) * (TruckRearSupportCm / 100);
         }
     }
-    if (IsBladeWorking() && Speed > 0 && bBucketGround && Terrain.HitsTree(Position + Forward * 3.1, 1.95, true))
+    if(FMath::Abs(DriveCommand)>.05||FMath::Abs(Speed)>.1)
     {
-        ++SoundImpact;
-        SoundImpactLevel = 0.65f;
-        bSoundTreeImpact = true;
+        const double ContactHeight=IsBladeWorking()?0.95:1.1;
+        const double WeightN=(Info.Mass+Cargo.Mass())*9810;
+        const double ForceN=WeightN*EffectiveGrip*FMath::Abs(DriveCommand)+
+            FMath::Min((Info.Mass+Cargo.Mass())*1000*Speed*Speed/.5,WeightN*6);
+        const FVector2D PushDirection=Forward*((FMath::Abs(Speed)>.1?Speed:DriveCommand)>=0?1:-1);
+        const double Nose=Kind==EMudMachine::Dozer?(IsBladeWorking()?3.1:1.4):Kind==EMudMachine::Truck?3.12:2.55;
+        Terrain.PushTrees(Next+PushDirection*Nose,1.3,PushDirection,ForceN,ContactHeight,Dt);
     }
     const auto Blocked = [&]()
     {
@@ -1576,9 +1589,11 @@ void AMudMachine::Work(double Dt, double AxisA, double AxisB, AMudTerrain& Terra
         const FVector2D Across = Horizontal(Tool->GetRightVector()).GetSafeNormal();
         const double Rate = Cargo.Volume() * (FMath::Abs(BladeYaw) / 25.0 * 0.38 +
             FMath::Max(0.0, Cargo.Volume() / Capacity() - 0.35) * 0.22);
-        const Load SideFlow = Cargo.Take(Rate * Dt);
-        const double Side = BladeYaw >= 0 ? 1.0 : -1.0;
-        Terrain.Spread(XY + Across * (Side * 2.25), Across, {0.85, 1.15}, SideFlow);
+        Load SideFlow = Cargo.Take(Rate * Dt);
+        const double RightFraction=FMath::Clamp(.5+BladeYaw/25.0*.45,.05,.95);
+        const Load RightFlow=SideFlow.Take(SideFlow.Volume()*RightFraction);
+        Terrain.Spread(XY+Across*2.25,Across,{.85,1.15},RightFlow);
+        Terrain.Spread(XY-Across*2.25,Across,{.85,1.15},SideFlow);
     }
     if (SpillVolume > Epsilon)
         Terrain.ShowSpill(FVector(Point.X, Point.Y, FMath::Max(Ground, Point.Z)), SpillVolume,

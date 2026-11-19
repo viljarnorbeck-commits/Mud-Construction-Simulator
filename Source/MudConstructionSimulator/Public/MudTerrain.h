@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Earthwork.h"
+#include "TreePhysics.h"
 #include "MudTerrain.generated.h"
 
 class UHierarchicalInstancedStaticMeshComponent;
@@ -10,6 +11,7 @@ class UInstancedStaticMeshComponent;
 class UProceduralMeshComponent;
 class UTexture2D;
 class UMaterialInterface;
+class UStaticMeshComponent;
 class FJsonObject;
 
 struct FMudPile
@@ -92,6 +94,9 @@ public:
     double Grade(FVector2D XY, FVector2D Across, FVector2D Reach, double Rate, double ToolHeight, FVector2D Slopes);
     void UpdateTiles(FVector2D Focus);
     bool HitsTree(FVector2D XY, double Radius, bool bClear);
+    void PushTrees(FVector2D XY, double Radius, FVector2D Direction, double ForceN, double ContactHeight, double Dt);
+    void UpdateEnvironment(FVector2D Focus, double Dt);
+    FString GetWorldId() const { return WorldId; }
     double Remaining(const FMudPile& Pile) const;
     double EstimateFordFill(FVector2D Ford, double Clearance) const;
     FMudRoadSurvey SurveyFordRoad(FVector2D Ford) const;
@@ -109,6 +114,7 @@ public:
     UTexture2D* GetOverview() const { return Overview; }
 
 private:
+    friend class AMudWorldValidation;
     static constexpr int32 TileSize = 64;
     static constexpr int32 CrownTiers = 3;
     static constexpr int32 RubbleRadius = 36;
@@ -119,6 +125,11 @@ private:
         FTransform Trunk;
         FTransform Crown[CrownTiers];
         bool bRemoved = false;
+        bool bFallen = false;
+        TreePhysics::Root Root;
+        FVector2D BendDirection = FVector2D(1,0);
+        UStaticMeshComponent* Body = nullptr;
+        double LastPush = -100;
     };
     struct FRiverSample { FVector2D XY; double Z; double Width; };
     struct FGroundPlant
@@ -156,6 +167,18 @@ private:
     int32 Samples = 0;
     int32 TilesPerSide = 0;
     int32 Seed = 0;
+    FString WorldId;
+    struct FGeology { FVector2D XY, Radii; Earthwork::Material Type; double Depth; };
+    TArray<FGeology> Geology;
+    struct FBoulder { FVector2D XY; double Radius; };
+    TArray<FBoulder> Boulders;
+    UPROPERTY() TArray<TObjectPtr<AActor>> FallenActors;
+    UPROPERTY() TObjectPtr<UHierarchicalInstancedStaticMeshComponent> BoulderMesh;
+    TSet<int32> BentTrees;
+    TMap<int32,UStaticMeshComponent*> TreeContacts;
+    TMultiMap<int32,int32> BoulderTiles;
+    bool bRestoringTerrain=false;
+    void UpdateTreeSupport(int32 Cell);
     int32 CrownInstancesPerTree = CrownTiers;
     TArray<float> Original;
     TArray<float> Heights;
@@ -216,4 +239,8 @@ private:
     void BuildWater();
     void BuildMarkers();
     void HideTree(int32 Id);
+    void ActivateTree(int32 Id);
+    void BendTree(int32 Id);
+    void SaveEnvironment(FJsonObject& Data) const;
+    bool RestoreEnvironment(const FJsonObject& Data, bool ValidateOnly);
 };

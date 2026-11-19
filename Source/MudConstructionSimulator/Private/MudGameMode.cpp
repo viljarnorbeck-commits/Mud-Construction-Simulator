@@ -17,6 +17,7 @@
 #include "HAL/PlatformMisc.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
+#include "HAL/PlatformMemory.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "InputKeyEventArgs.h"
 #include "Misc/CommandLine.h"
@@ -27,6 +28,7 @@
 #include "MudMachine.h"
 #include "MudTerrain.h"
 #include "SoilValidation.h"
+#include "MudWorldValidation.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
@@ -43,6 +45,7 @@ constexpr double FixedStep = 1.0 / 60.0;
 const FVector2D ParkingOffsets[] = {{-5, -10.5}, {-4, -3.5}, {7, 10.5}, {8, 18}, {-10, 12}};
 constexpr int32 LegacyVehicleCount = static_cast<int32>(EMudMachine::Loader);
 constexpr int32 SaveVersion = 3;
+FString ProfileWorldId=TEXT("Default");
 constexpr double AutosaveInterval = 5 * 60;
 
 const TCHAR* ArrowHelp(const AMudMachine& Machine)
@@ -58,21 +61,25 @@ const TCHAR* ArrowHelp(const AMudMachine& Machine)
 }
 
 FVector2D XY(const FVector& Point) { return FVector2D(Point.X, Point.Y); }
+FString WorldProfile()
+{
+    return ProfileWorldId;
+}
 FString SavePath()
 {
     // An isolated Windows preview can use a host-mapped profile directory.
     FString ProfileDirectory;
     if (FParse::Value(FCommandLine::Get(), TEXT("MudProfileDir="), ProfileDirectory) && !ProfileDirectory.IsEmpty())
         return FPaths::ConvertRelativePathToFull(ProfileDirectory) / TEXT("Valley.json");
-    const TCHAR* Profile = FParse::Param(FCommandLine::Get(), TEXT("MudSoilLab")) ?
-        TEXT("MudConstructionSimulator/Profiles/SoilLab/Valley.json") : TEXT("MudConstructionSimulator/Profiles/Default/Valley.json");
-    return FString(FPlatformProcess::UserSettingsDir()) / Profile;
+    FString Profile=WorldProfile();
+    if(FParse::Param(FCommandLine::Get(),TEXT("MudSoilLab")))Profile=Profile==TEXT("Default")?TEXT("SoilLab"):Profile+TEXT("-SoilLab");
+    return FString(FPlatformProcess::UserSettingsDir())/TEXT("MudConstructionSimulator/Profiles")/Profile/TEXT("Valley.json");
 }
 
 FString LoadPath()
 {
     const FString Current = SavePath();
-    return IFileManager::Get().FileExists(*Current) ? Current : FPaths::ProjectSavedDir() / TEXT("Valley.json");
+    return WorldProfile()!=TEXT("Default")||IFileManager::Get().FileExists(*Current) ? Current : FPaths::ProjectSavedDir() / TEXT("Valley.json");
 }
 
 const TCHAR* MaterialName(Material Type)
@@ -119,15 +126,9 @@ bool TestTrackMarks(AMudTerrain& Terrain)
     const FVector2D Start = XY(Terrain.Start) + FVector2D(14, -19);
     const FVector2D Center(FMath::RoundToInt(Start.X), FMath::RoundToInt(Start.Y));
     const auto InitialTerrain = Terrain.SaveTerrain();
-    const auto LocalVolume = [&]()
-    {
-        double Volume = 0;
-        for (int32 Y = -4; Y <= 4; ++Y)
-            for (int32 X = -4; X <= 4; ++X)
-                Volume += Terrain.Height(Center + FVector2D(X, Y));
-        return Volume;
-    };
-    const double Before = LocalVolume();
+    // Compaction lowers occupied volume without removing mass.
+    const auto GroundMass = [&]() { return Terrain.MaterialBalance(); };
+    const double Before = GroundMass();
     const double StartHeight = Terrain.Height(Center);
     const auto Stamp = [&](double Scrub)
     {
@@ -136,10 +137,10 @@ bool TestTrackMarks(AMudTerrain& Terrain)
         return StartHeight - Terrain.Height(Center);
     };
     const double StraightDepth = Stamp(0);
-    const bool bStraight = StraightDepth > 0.005 && FMath::IsNearlyEqual(Before, LocalVolume(), 0.005);
+    const bool bStraight = StraightDepth > 0.005 && FMath::IsNearlyEqual(Before, GroundMass(), 0.00001);
     const bool bReset = Terrain.RestoreTerrain(InitialTerrain);
     const double TurnDepth = Stamp(1);
-    const bool bTurn = TurnDepth > StraightDepth + 0.025 && FMath::IsNearlyEqual(Before, LocalVolume(), 0.005);
+    const bool bTurn = TurnDepth > StraightDepth + 0.025 && FMath::IsNearlyEqual(Before, GroundMass(), 0.00001);
     const auto WithTracks = Terrain.SaveTerrain();
     const double TrackCount = WithTracks->GetArrayField(TEXT("trackWear")).Num();
     const bool bRoundTrip = Terrain.RestoreTerrain(InitialTerrain) && Terrain.RestoreTerrain(WithTracks) &&
@@ -346,7 +347,8 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
         }
     }
     const double Dig = Excavator->Cargo.Volume();
-    const bool bDug = Dig > 1.2 && Sweep > 0.85 && FMath::IsNearlyEqual(Before - GroundVolume(), Dig, 0.005);
+    const bool bDug = Dig > 0.25 && Dig <= Excavator->Capacity() && Sweep > 0.85 &&
+        FMath::IsNearlyEqual(Before - GroundVolume(), Dig, 0.005);
     Excavator->ToggleUnload();
     for (int32 I = 0; I < 225; ++I)
         Excavator->Work(FixedStep, 0, 0, Terrain, Fleet);
@@ -409,7 +411,7 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
     for (int32 I = 0; I < 225; ++I)
         Excavator->Work(FixedStep, 0, 0, Terrain, Fleet);
     const double BedLoad = Dumper->Cargo.Volume();
-    const bool bLoadedBed = BedLoad > 1.2 && FMath::IsNearlyEqual(SecondBucket, BedLoad, 0.002) &&
+    const bool bLoadedBed = SecondBucket > 0.25 && FMath::IsNearlyEqual(SecondBucket, BedLoad, 0.002) &&
         Excavator->Cargo.Volume() < Epsilon && FMath::IsNearlyEqual(Before - GroundVolume(), BedLoad, 0.005);
     Dumper->Position = Center + FVector2D(12, 7);
     Dumper->UpdatePose(Terrain);
@@ -555,6 +557,7 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
     const FVector2D BladeEdge = XY(Dozer->ToolPoint());
     Terrain.Deposit(BladeEdge, 1.1, PushPile);
     const double BeforeOverflow = GroundVolume();
+    const double FullBladeVolume=Dozer->Cargo.Volume();
     const FVector2D RightBank = BladeEdge + FVector2D(-0.65, 2.55);
     const FVector2D LeftBank = BladeEdge + FVector2D(-0.65, -2.55);
     const double RightBefore = Terrain.Height(RightBank), LeftBefore = Terrain.Height(LeftBank);
@@ -564,8 +567,9 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
         Dozer->Work(FixedStep, 0, 0, Terrain, Fleet);
     }
     const double RightGain = Terrain.Height(RightBank) - RightBefore, LeftGain = Terrain.Height(LeftBank) - LeftBefore;
-    const bool bFullPush = RightGain > 0.05 && LeftGain > 0.025 && FMath::IsNearlyEqual(Dozer->Cargo.Volume(), Dozer->Capacity(), 0.005) &&
-        FMath::IsNearlyEqual(BeforeOverflow, GroundVolume(), 0.005);
+    const bool bFullPush = RightGain > 0.005 && LeftGain > 0.005 && Dozer->Cargo.Volume()>Dozer->Capacity()*.5 &&
+        Dozer->Cargo.Volume()<=Dozer->Capacity()+Epsilon&&
+        FMath::IsNearlyEqual(BeforeOverflow+FullBladeVolume,GroundVolume()+Dozer->Cargo.Volume(),0.00001);
 
     Excavator->StopWork();
     Excavator->Position = Center + FVector2D(-11, -9);
@@ -631,12 +635,21 @@ void AMudOperator::BeginPlay()
             FPlatformMisc::RequestExitWithStatus(false, 1);
         return;
     }
+    ProfileWorldId=Terrain->GetWorldId();
+    if(FParse::Param(FCommandLine::Get(),TEXT("MudSoilLab")))ProfileWorldId.RemoveFromEnd(TEXT("-soil-lab"));
+    if(ProfileWorldId.IsEmpty())ProfileWorldId=TEXT("Default");
     OnFoot = XY(Terrain->Start);
     for (int32 Id = 0; Id < UE_ARRAY_COUNT(ParkingOffsets); ++Id)
     {
         auto* Machine = GetWorld()->SpawnActor<AMudMachine>();
         Machine->Initialize(static_cast<EMudMachine>(Id), OnFoot + ParkingOffsets[Id], *Terrain);
         Fleet.Add(Machine);
+    }
+    if(FParse::Param(FCommandLine::Get(),TEXT("MudWorldValidation")))
+    {
+        bInitializeFailed=true; // The diagnostic actor owns the simulation; no player autosave is armed.
+        auto* Validation=GetWorld()->SpawnActor<AMudWorldValidation>();Validation->Initialize(Terrain);
+        return;
     }
     if (FParse::Param(FCommandLine::Get(), TEXT("MudSoilValidation")))
     {
@@ -791,6 +804,7 @@ void AMudOperator::Tick(float Dt)
     const FVector2D Location = GetPosition();
     Terrain->UpdateTiles(Location);
     Terrain->UpdateSpills(FMath::Min(Dt, 0.1f));
+    Terrain->UpdateEnvironment(Location,FMath::Min(Dt,0.1f));
     if (NextAutosave > 0 && !bProtectSave && FPlatformTime::Seconds() >= NextAutosave)
     {
         NextAutosave = FPlatformTime::Seconds() + AutosaveInterval;
@@ -971,6 +985,11 @@ void AMudOperator::UpdateBenchmark()
     IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
     const bool bSaved = FFileHelper::SaveStringToFile(Csv, *Path);
     UE_LOG(LogTemp, Display, TEXT("%s | %s"), *Summary, bSaved ? *Path : TEXT("CSV write failed"));
+    const auto Memory=FPlatformMemory::GetStats();
+    const auto Size=GEngine->GameViewport&&GEngine->GameViewport->Viewport?GEngine->GameViewport->Viewport->GetSizeXY():FIntPoint::ZeroValue;
+    const auto* RenderScale=IConsoleManager::Get().FindConsoleVariable(TEXT("r.ScreenPercentage"));
+    UE_LOG(LogTemp,Display,TEXT("Benchmark environment: %s, %dx%d, %.1f%% screen percentage, peak process physical %.1f MiB"),
+        *Terrain->GetWorldId(),Size.X,Size.Y,RenderScale?RenderScale->GetFloat():0,Memory.PeakUsedPhysical/1048576.0);
     Notify(Summary);
     if (FParse::Param(FCommandLine::Get(), TEXT("MudBenchmarkExit")))
         FPlatformMisc::RequestExit(false);

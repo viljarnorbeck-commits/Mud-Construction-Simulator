@@ -14,6 +14,7 @@ class UProceduralMeshComponent;
 class UInstancedStaticMeshComponent;
 class UTextRenderComponent;
 class UMeshComponent;
+class UBoxComponent;
 enum class EMudMachine : uint8 { Dozer, Excavator, Dumper, Truck, Loader };
 
 struct FMudMachineSound
@@ -194,6 +195,7 @@ private:
     UPROPERTY() TObjectPtr<USceneComponent> TipBed;
     UPROPERTY() TObjectPtr<USceneComponent> TruckTailgate;
     UPROPERTY() TObjectPtr<USceneComponent> RearFrame;
+    UPROPERTY() TObjectPtr<UBoxComponent> EnvironmentCollider;
     UPROPERTY() TObjectPtr<UProceduralMeshComponent> Payload;
     UPROPERTY() TObjectPtr<USceneComponent> CabEye;
     UPROPERTY() TObjectPtr<USceneComponent> CabWheel;

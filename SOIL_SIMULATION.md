@@ -1,9 +1,11 @@
 # Marksimulering – implementation och verifiering
 
-Status 2026-11-19: fysikkärnan är testad och Unreal-integrationen kompilerar.
-Det praktiska acceptansflödet är **inte godkänt**. Windows blockerar den nya
-osignerade spelmodulen (GetLastError 4551, CodeIntegrity 3077/3033).
-Samma fel uppstod i Windows Sandbox. Inga säkerhetsinställningar har ändrats.
+Verifieringsuppdatering 2026-11-19: den senaste koden har körts i Unreal med NullRHI.
+Det praktiska markarbetsflödet med tre bladvinklar, lastare, transport,
+tippning, lastbilsspår och riktig diskåterläsning passerade.
+Grafisk körning fungerade under utvecklingen, men den sista grafiska uppstarten
+blockerades åter av Windows kodintegritet. Inga säkerhetsinställningar har ändrats.
+Se även `HIGHLANDS.md` för den nya världens integrationstester och startbegränsningen.
 
 ## Referenser och föranalys
 
@@ -92,9 +94,10 @@ lista. Fallande material och maskinlast sparar alla fem material; bladvinkeln
 sparas separat. Äldre tre-materialslaster och lager utan packningsfält läses
 med nollvärden för nya fält. Gamla ID:n för jord, grus och berg behålls.
 
-Labbet har en separat lokal profil i
+Labbet har en separat lokal profil. För den ursprungliga världen används
 `%LOCALAPPDATA%/MudConstructionSimulator/Profiles/SoilLab/Valley.json`.
-Den vanliga världen ligger kvar i profilen `Default`.
+Highlands använder `Profiles/highlands-v2-42-SoilLab/Valley.json`.
+Den ursprungliga spelvärlden ligger kvar i profilen `Default`.
 
 ## Testa på Windows
 
@@ -134,9 +137,9 @@ skriver bildrutetid, senaste jordstegets tid och aktiva celler till
 `Saved/Benchmark.csv`. Kolumnen jordtid avser senaste fysiksteg, inte summan av
 alla catch-up-steg i en bildruta. Benchmark täcker en renderad arbetsplats.
 
-På denna dator avbröts Unreal före spelets start eftersom Windows nekade
-DLL-inläsningen. Startskriptet kringgår inte den blockeringen. En installerare
-eller spelbar betaversion med dessa ändringar har inte framställts.
+Det senaste acceptanstestet startade och passerade. Maximalt massfel
+rapporterades som 0,000000000 ton med kontrollgränsen 0,00001 ton.
+En ny betainstallerare har inte framställts i denna omgång.
 
 ## Utförda tester
 
@@ -158,7 +161,7 @@ Verifierat i den delade produktionskärnan:
   fungerar även efter packning. Drivlinan kan slira och fastna.
 - F: 36 000 steg, tio simulerade minuter, utan ändring efter stabilisering.
 - G: kopierade lager och massa bevaras i kärntestet. Riktig diskåterläsning
-  finns i Unreal-testet och är ännu inte verifierad.
+  och fortsatt stabilisering passerade även i Unreal-testet.
 - H: fem CPU-scenarier med 600 steg vardera, 64×64 celler och budget 768.
 
 UnrealEditor Win64 Development kompilerar med Visual Studio 2022.
@@ -183,9 +186,10 @@ fordon eller GPU. De verifierar varken 60 FPS eller 4K/120 FPS i spelet.
 
 ## Kvarvarande begränsningar och acceptans
 
-Den fullständiga Windows-körningen, visuellt överensstämmande kollision,
-maskinregressioner, spelets minne, CPU/GPU-bildrutetider och det praktiska
-arbetsflödet återstår att verifiera. Uppdragets slutacceptans är därför öppen.
+Windows-testerna för markarbetsflöde och maskinregressioner har passerat.
+Highlands-testet kontrollerar även en faktisk Chaos-markträff mot höjddata.
+Renderingsprestanda och processminne redovisas i `HIGHLANDS.md`.
+En längre manuell spelomgång och fler kombinerade belastningsfall återstår.
 
 Modellen har en meters horisontell upplösning, inga överhäng/tunnlar, ingen
 granulär tröghetsmodell med individuella kontaktkrafter och inget porvattentryck.
@@ -193,9 +197,9 @@ Material i blad/skopa representeras som massbärande lastbehållare. Blandade
 laster återförs i bestämd lagerordning; ingen kornseparation simuleras.
 Fukten kommer från platsens befintliga våtmarks-/vattendata och transporteras
 inte med varje last. Vattenflöde/erosion, GPU compute och parallell solver
-är inte implementerade. Sand/lera har egna materialtinter i generatorn men
-använder befintlig jordtextur; tillgångarna har inte kunnat regenereras efter
-Windows-blockeringen. Fallback-material gör äldre tillgångar läsbara.
+är inte implementerade. Sand/lera har egna materialtinter men använder befintlig
+jordtextur. Dessa tillgångar och markmaterialet har nu regenererats.
+Fallback-material gör äldre tillgångar läsbara.
 
 De huvudsakliga ändringarna finns i `Earthwork.h`, `RunningGear.h`,
 `MudTerrain.cpp/.h`, `MudMachine.cpp/.h`, `MachineMotion.h`, `MudGameMode.cpp/.h`,

@@ -109,3 +109,7 @@ c++ -std=c++17 -ISource/MudConstructionSimulator/Public tests/earthwork.cpp -o /
 ## Markfysik och testmiljö
 
 Se [SOIL_SIMULATION.md](SOIL_SIMULATION.md) för arkitektur, testresultat, kvarvarande begränsningar och hur marklabbet startas.
+
+## Highlands
+
+Den nya världen är 2 × 2 km. Start, tester och resultat finns i [HIGHLANDS.md](HIGHLANDS.md).

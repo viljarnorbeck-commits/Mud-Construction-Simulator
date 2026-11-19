@@ -65,6 +65,11 @@ AMudTerrain::AMudTerrain()
     Meadow->SetCollisionEnabled(ECollisionEnabled::NoCollision);
     Meadow->SetCastShadow(false);
     Meadow->SetCullDistances(3600, 6500);
+    BoulderMesh = CreateDefaultSubobject<UHierarchicalInstancedStaticMeshComponent>(TEXT("Boulders"));
+    BoulderMesh->SetupAttachment(RootComponent);
+    BoulderMesh->SetCollisionProfileName(TEXT("BlockAll"));
+    BoulderMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+    BoulderMesh->SetCullDistances(22000,36000);
     for (const TCHAR* Name : {TEXT("FallingSoil"), TEXT("FallingGravel"), TEXT("FallingRock"), TEXT("FallingSand"), TEXT("FallingClay")})
     {
         auto* Pieces = CreateDefaultSubobject<UInstancedStaticMeshComponent>(FName(Name));
@@ -127,6 +132,8 @@ bool AMudTerrain::Initialize()
         return false;
     TilesPerSide = (Samples - 1) / TileSize;
     Seed = Data->GetIntegerField(TEXT("seed"));
+    Data->TryGetStringField(TEXT("worldId"),WorldId);
+    for(TCHAR C:WorldId)if(!FChar::IsAlnum(C)&&C!='-'&&C!='_')return false;
     const double Minimum = Map.GetNumberField(TEXT("minElevation"));
     const double Maximum = Map.GetNumberField(TEXT("maxElevation"));
 
@@ -151,8 +158,8 @@ bool AMudTerrain::Initialize()
     {
         const FJsonObject& Pile = *Value->AsObject();
         const FString Type = Pile.GetStringField(TEXT("material"));
-        const Material Kind = Type == TEXT("gravel") ? Material::Gravel :
-            (Type == TEXT("crushed-rock") ? Material::Rock : Material::Soil);
+        const Material Kind = Type == TEXT("gravel") ? Material::Gravel : Type == TEXT("sand") ? Material::Sand :
+            Type == TEXT("clay") ? Material::Clay : (Type == TEXT("crushed-rock") ? Material::Rock : Material::Soil);
         Piles.Add({ ReadXY(Pile), Pile.GetNumberField(TEXT("radius")), Pile.GetNumberField(TEXT("height")),
             Kind, Pile.GetNumberField(TEXT("volumeM3")) });
     }
@@ -164,6 +171,23 @@ bool AMudTerrain::Initialize()
     }
     if (River.Num() < 2)
         return false;
+    const TArray<TSharedPtr<FJsonValue>>* Regions;
+    if(Data->TryGetArrayField(TEXT("geology"),Regions))for(const auto& V:*Regions)
+    {
+        const auto& R=*V->AsObject();
+        const auto Type=R.GetStringField(TEXT("material"))==TEXT("clay")?Material::Clay:Material::Sand;
+        Geology.Add({ReadXY(R),FVector2D(R.GetNumberField(TEXT("rx")),R.GetNumberField(TEXT("ry"))),Type,R.GetNumberField(TEXT("soilDepth"))});
+    }
+    BoulderMesh->SetStaticMesh(LoadObject<UStaticMesh>(nullptr,TEXT("/Engine/BasicShapes/Sphere.Sphere")));
+    BoulderMesh->SetMaterial(0,GeneratedMaterial(TEXT("LooseRock")));
+    const TArray<TSharedPtr<FJsonValue>>* Rocks;
+    if(Data->TryGetArrayField(TEXT("boulders"),Rocks))for(const auto& V:*Rocks)
+    {
+        const auto& R=*V->AsObject();const FVector2D P=ReadXY(R);const double Radius=R.GetNumberField(TEXT("radius"));
+        BoulderTiles.Add(TileIndex(P.X,P.Y),Boulders.Add({P,Radius}));
+        BoulderMesh->AddInstance(FTransform(FRotator(11,FMath::Fmod(P.X*17+P.Y*13,360),17),
+            FVector(P.X,P.Y,Height(P)+Radius*.35)*100,FVector(Radius*2,Radius*1.65,Radius*1.4)));
+    }
     for (const auto& Value : RiverData.GetArrayField(TEXT("fords")))
         Fords.Add(ReadXY(*Value->AsObject()));
     Data->TryGetBoolField(TEXT("roadContract"), bRoadContract);
@@ -202,8 +226,11 @@ bool AMudTerrain::Initialize()
         FTree Entry;
         Entry.XY = ReadXY(Tree);
         const double TrunkWidth = TreeVariation.FRandRange(0.25, 0.44);
-        Entry.Trunk = FTransform(FRotator::ZeroRotator, Position + FVector(0, 0, 187 * Scale),
-            FVector(TrunkWidth, TrunkWidth, 3.74) * Scale);
+        Entry.Root.Diameter=TrunkWidth*Scale;Entry.Root.Height=7.5*Scale;
+        Tree.TryGetNumberField(TEXT("diameter"),Entry.Root.Diameter);
+        Tree.TryGetNumberField(TEXT("height"),Entry.Root.Height);
+        Entry.Trunk = FTransform(FRotator::ZeroRotator, Position + FVector(0,0,Entry.Root.Height*50),
+            FVector(Entry.Root.Diameter,Entry.Root.Diameter,Entry.Root.Height));
         const double Bearing = FMath::Fmod(Entry.XY.X * 11 + Entry.XY.Y * 13, 360.0);
         if (CanopyMesh)
         {
@@ -232,6 +259,7 @@ bool AMudTerrain::Initialize()
     Trunks->AddInstances(TrunkTransforms, false, false, false);
     Crowns->AddInstances(CrownTransforms, false, false, false);
     bSoilLab = FParse::Param(FCommandLine::Get(), TEXT("MudSoilLab"));
+    if(bSoilLab)WorldId+=TEXT("-soil-lab");
     if (bSoilLab) InitializeSoilLab();
     BuildGroundCover();
     auto* ClumpMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Generated/SpoilClump.SpoilClump"));
@@ -376,7 +404,7 @@ Earthwork::Material AMudTerrain::Surface(FVector2D XY) const
     for (const FMudPile& Pile : Piles)
         if (FVector2D::DistSquared(Pile.Center, FVector2D(X, Y)) < FMath::Square(Pile.Radius))
             return Pile.Material;
-    return bSoilLab ? OriginalColumn(Index(X, Y)).Surface() : Material::Soil;
+    return bSoilLab || !WorldId.IsEmpty() ? OriginalColumn(Index(X, Y)).Surface() : Material::Soil;
 }
 
 double AMudTerrain::AggregateCover(int32 Cell) const
@@ -443,6 +471,17 @@ Earthwork::Column AMudTerrain::OriginalColumn(int32 Cell) const
             XY.X < 270 ? Material::Clay : XY.X < 300 ? Material::Gravel : Material::Rock;
         return {Original[Cell] - 5.0, {{Material::Rock, 2.0}, {Type, 3.0}}};
     }
+    if(!WorldId.IsEmpty())
+    {
+        const int32 X=Cell%Samples,Y=Cell/Samples;
+        const double Slope=FMath::Sqrt(FMath::Square((Original[Index(FMath::Min(X+1,Samples-1),Y)]-Original[Index(FMath::Max(X-1,0),Y)])*.5)+
+            FMath::Square((Original[Index(X,FMath::Min(Y+1,Samples-1))]-Original[Index(X,FMath::Max(Y-1,0))])*.5));
+        Material Type=Slope>.85?Material::Rock:Material::Soil;double Depth=Type==Material::Rock?0:2.2;
+        for(const auto& R:Geology)if(FVector2D((XY.X-R.XY.X)/R.Radii.X,(XY.Y-R.XY.Y)/R.Radii.Y).SizeSquared()<1){Type=R.Type;Depth=R.Depth;}
+        double Deposit=0;Material Cover=Material::Soil;
+        for(const auto& P:Piles){const double D=P.Height*(1-FVector2D::Distance(P.Center,XY)/P.Radius);if(D>0){Deposit=D;Cover=P.Material;break;}}
+        Column Result{Original[Cell]-Deposit-32,{}};Result.Add(Material::Rock,32-Depth);Result.Add(Type,Depth);Result.Add(Cover,Deposit);return Result;
+    }
     for (const FMudPile& Pile : Piles)
     {
         const double Deposit = Pile.Height * (1.0 - FVector2D::Distance(Pile.Center, XY) / Pile.Radius);
@@ -465,6 +504,7 @@ void AMudTerrain::UpdateCell(int32 Cell, double WorkDelta)
     MassDelta += Balance - AccountedMass.FindRef(Cell);
     AccountedMass.Add(Cell, Balance);
     Heights[Cell] = Changed[Cell].Height();
+    if(Heights[Cell]<Original[Cell]-.35)UpdateTreeSupport(Cell);
     SoilFlow.WakeArea(Cell);
     if (FMath::Abs(WorkDelta) > Epsilon)
     {
@@ -1166,7 +1206,7 @@ void AMudTerrain::BuildTile(int32 Id, int32 Step)
     }
     else
     {
-        Mesh->SetCollisionEnabled(Step == 1 ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
+        Mesh->SetCollisionEnabled(Step == 1 ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
         Mesh->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, UV, FinishMasks, {}, {},
             Colors, Tangents, Step == 1, false);
     }
@@ -1449,6 +1489,18 @@ void AMudTerrain::BuildMarkers()
 
 bool AMudTerrain::HitsTree(FVector2D XY, double Radius, bool bClear)
 {
+    // Tree removal is handled by root failure and persistent rigid bodies.
+    TSet<int32> RockTiles;
+    for(double DX:{-Radius-2.1,Radius+2.1})for(double DY:{-Radius-2.1,Radius+2.1})RockTiles.Add(TileIndex(XY.X+DX,XY.Y+DY));
+    for(int32 Tile:RockTiles)for(auto It=BoulderTiles.CreateConstKeyIterator(Tile);It;++It)
+    {const auto& Rock=Boulders[It.Value()];if(FVector2D::Distance(XY,Rock.XY)<Radius+Rock.Radius)return true;}
+    const FVector Probe(XY.X*100,XY.Y*100,(Height(XY)+.9)*100);
+    for(AActor* Actor:FallenActors)
+    {
+        auto* Body=Cast<UStaticMeshComponent>(Actor->GetRootComponent());
+        const FVector Center=Body->GetComponentLocation(),Axis=Body->GetUpVector()*Body->GetComponentScale().Z*50;
+        if(FMath::PointDistToSegment(Probe,Center-Axis,Center+Axis)<Radius*100+Body->GetComponentScale().X*50)return true;
+    }
     bool bHit = false;
     TSet<int32> Tiles;
     for (const double DX : {-Radius, Radius})
@@ -1459,10 +1511,8 @@ bool AMudTerrain::HitsTree(FVector2D XY, double Radius, bool bClear)
         for (auto It = TreeTiles.CreateConstKeyIterator(Tile); It; ++It)
         {
             const int32 Id = It.Value();
-            if (Trees[Id].bRemoved || FVector2D::DistSquared(XY, Trees[Id].XY) > FMath::Square(Radius))
+            if (Trees[Id].bRemoved || FVector2D::DistSquared(XY, Trees[Id].XY) > FMath::Square(Radius+Trees[Id].Root.Diameter*.5))
                 continue;
-            if (bClear)
-                HideTree(Id);
             bHit = true;
         }
     }
@@ -1485,6 +1535,8 @@ void AMudTerrain::HideTree(int32 Id)
 TSharedRef<FJsonObject> AMudTerrain::SaveTerrain() const
 {
     auto Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("worldId"),WorldId);
+    SaveEnvironment(*Data);
     TArray<TSharedPtr<FJsonValue>> Edits, Removed, Tracks, Falling;
     for (const auto& Entry : Changed)
     {
@@ -1505,7 +1557,7 @@ TSharedRef<FJsonObject> AMudTerrain::SaveTerrain() const
         Edits.Add(MakeShared<FJsonValueObject>(Row));
     }
     for (int32 Id = 0; Id < Trees.Num(); ++Id)
-        if (Trees[Id].bRemoved)
+        if (Trees[Id].bRemoved&&!Trees[Id].bFallen)
             Removed.Add(MakeShared<FJsonValueNumber>(Id));
     Data->SetArrayField(TEXT("edits"), Edits);
     Data->SetArrayField(TEXT("removedTrees"), Removed);
@@ -1531,6 +1583,10 @@ TSharedRef<FJsonObject> AMudTerrain::SaveTerrain() const
 
 bool AMudTerrain::RestoreTerrain(const TSharedPtr<FJsonObject>& Data)
 {
+    FString SavedWorld;
+    if(!Data.IsValid())return false;
+    Data->TryGetStringField(TEXT("worldId"),SavedWorld);
+    if(SavedWorld!=WorldId||!RestoreEnvironment(*Data,true))return false;
     const TArray<TSharedPtr<FJsonValue>> *Edits, *Removed;
     if (!Data.IsValid() || !Data->TryGetArrayField(TEXT("edits"), Edits) ||
         !Data->TryGetArrayField(TEXT("removedTrees"), Removed))
@@ -1643,8 +1699,12 @@ bool AMudTerrain::RestoreTerrain(const TSharedPtr<FJsonObject>& Data)
     bRubbleDirty = true;
     NextRubbleUpdate = 0;
     Heights = Original;
+    bRestoringTerrain=true;
     for (const auto& Entry : Changed)
+    {
         UpdateCell(Entry.Key);
+    }
+    bRestoringTerrain=false;
     for (int32 Id = 0; Id < Trees.Num(); ++Id)
     {
         if (RemovedIds.Contains(Id))
@@ -1658,5 +1718,5 @@ bool AMudTerrain::RestoreTerrain(const TSharedPtr<FJsonObject>& Data)
                     false, Tier == CrownInstancesPerTree - 1, true);
         }
     }
-    return true;
+    return RestoreEnvironment(*Data,false);
 }
