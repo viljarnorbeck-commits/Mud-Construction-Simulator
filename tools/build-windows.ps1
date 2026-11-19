@@ -9,6 +9,7 @@ param(
     [string]$CertificateThumbprint,
     [ValidatePattern('^https://[^\s"$]+$')]
     [string]$TimestampUrl,
+    [string]$WorldDirectory = 'world/highlands-42',
     [switch]$Launch
 )
 
@@ -50,7 +51,7 @@ function Invoke-BuildStep {
 $world = Join-Path $projectRoot 'Content/World'
 [void](New-Item -ItemType Directory -Force -Path $world)
 foreach ($file in 'height.png', 'overview.png', 'world.json') {
-    Copy-Item -LiteralPath (Join-Path $projectRoot "world/42/$file") -Destination $world -Force
+    Copy-Item -LiteralPath (Join-Path (Join-Path $projectRoot $WorldDirectory) $file) -Destination $world -Force
 }
 
 Invoke-BuildStep -Executable $build -Arguments @(

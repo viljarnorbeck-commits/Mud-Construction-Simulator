@@ -17,6 +17,7 @@
 #include "HAL/PlatformMisc.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
+#include "HAL/PlatformMemory.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "InputKeyEventArgs.h"
 #include "Misc/CommandLine.h"
@@ -26,10 +27,15 @@
 #include "MudAudio.h"
 #include "MudMachine.h"
 #include "MudTerrain.h"
+#include "SoilValidation.h"
+#include "MudWorldValidation.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "UnrealClient.h"
+#if PLATFORM_WINDOWS
+#include "Windows/WindowsHWrapper.h"
+#endif
 
 namespace
 {
@@ -39,6 +45,8 @@ constexpr double FixedStep = 1.0 / 60.0;
 const FVector2D ParkingOffsets[] = {{-5, -10.5}, {-4, -3.5}, {7, 10.5}, {8, 18}, {-10, 12}};
 constexpr int32 LegacyVehicleCount = static_cast<int32>(EMudMachine::Loader);
 constexpr int32 SaveVersion = 3;
+FString ProfileWorldId=TEXT("Default");
+constexpr double AutosaveInterval = 5 * 60;
 
 const TCHAR* ArrowHelp(const AMudMachine& Machine)
 {
@@ -53,15 +61,25 @@ const TCHAR* ArrowHelp(const AMudMachine& Machine)
 }
 
 FVector2D XY(const FVector& Point) { return FVector2D(Point.X, Point.Y); }
+FString WorldProfile()
+{
+    return ProfileWorldId;
+}
 FString SavePath()
 {
-    return FString(FPlatformProcess::UserSettingsDir()) / TEXT("MudConstructionSimulator/Profiles/Default/Valley.json");
+    // An isolated Windows preview can use a host-mapped profile directory.
+    FString ProfileDirectory;
+    if (FParse::Value(FCommandLine::Get(), TEXT("MudProfileDir="), ProfileDirectory) && !ProfileDirectory.IsEmpty())
+        return FPaths::ConvertRelativePathToFull(ProfileDirectory) / TEXT("Valley.json");
+    FString Profile=WorldProfile();
+    if(FParse::Param(FCommandLine::Get(),TEXT("MudSoilLab")))Profile=Profile==TEXT("Default")?TEXT("SoilLab"):Profile+TEXT("-SoilLab");
+    return FString(FPlatformProcess::UserSettingsDir())/TEXT("MudConstructionSimulator/Profiles")/Profile/TEXT("Valley.json");
 }
 
 FString LoadPath()
 {
     const FString Current = SavePath();
-    return IFileManager::Get().FileExists(*Current) ? Current : FPaths::ProjectSavedDir() / TEXT("Valley.json");
+    return WorldProfile()!=TEXT("Default")||IFileManager::Get().FileExists(*Current) ? Current : FPaths::ProjectSavedDir() / TEXT("Valley.json");
 }
 
 const TCHAR* MaterialName(Material Type)
@@ -70,6 +88,8 @@ const TCHAR* MaterialName(Material Type)
     {
     case Material::Gravel: return TEXT("Gravel");
     case Material::Rock: return TEXT("Crushed rock");
+    case Material::Sand: return TEXT("Sand");
+    case Material::Clay: return TEXT("Clay");
     default: return TEXT("Soil");
     }
 }
@@ -106,15 +126,9 @@ bool TestTrackMarks(AMudTerrain& Terrain)
     const FVector2D Start = XY(Terrain.Start) + FVector2D(14, -19);
     const FVector2D Center(FMath::RoundToInt(Start.X), FMath::RoundToInt(Start.Y));
     const auto InitialTerrain = Terrain.SaveTerrain();
-    const auto LocalVolume = [&]()
-    {
-        double Volume = 0;
-        for (int32 Y = -4; Y <= 4; ++Y)
-            for (int32 X = -4; X <= 4; ++X)
-                Volume += Terrain.Height(Center + FVector2D(X, Y));
-        return Volume;
-    };
-    const double Before = LocalVolume();
+    // Compaction lowers occupied volume without removing mass.
+    const auto GroundMass = [&]() { return Terrain.MaterialBalance(); };
+    const double Before = GroundMass();
     const double StartHeight = Terrain.Height(Center);
     const auto Stamp = [&](double Scrub)
     {
@@ -123,10 +137,10 @@ bool TestTrackMarks(AMudTerrain& Terrain)
         return StartHeight - Terrain.Height(Center);
     };
     const double StraightDepth = Stamp(0);
-    const bool bStraight = StraightDepth > 0.005 && FMath::IsNearlyEqual(Before, LocalVolume(), 0.005);
+    const bool bStraight = StraightDepth > 0.005 && FMath::IsNearlyEqual(Before, GroundMass(), 0.00001);
     const bool bReset = Terrain.RestoreTerrain(InitialTerrain);
     const double TurnDepth = Stamp(1);
-    const bool bTurn = TurnDepth > StraightDepth + 0.025 && FMath::IsNearlyEqual(Before, LocalVolume(), 0.005);
+    const bool bTurn = TurnDepth > StraightDepth + 0.025 && FMath::IsNearlyEqual(Before, GroundMass(), 0.00001);
     const auto WithTracks = Terrain.SaveTerrain();
     const double TrackCount = WithTracks->GetArrayField(TEXT("trackWear")).Num();
     const bool bRoundTrip = Terrain.RestoreTerrain(InitialTerrain) && Terrain.RestoreTerrain(WithTracks) &&
@@ -176,6 +190,83 @@ bool TestFallingLoad(AMudTerrain& Terrain)
     UE_LOG(LogTemp, Display, TEXT("Falling gravel: airborne %d, save %d, landed %.3f m3, advanced %.2f m"),
         bAirborne, bRoundTrip, Placed.X, Placed.Y / 2.0);
     return Terrain.RestoreTerrain(Baseline) && bAirborne && bRoundTrip && bLanded;
+}
+
+bool TestGravelRoad(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
+{
+    if (!Terrain.HasRoadContract())
+        return true;
+    const auto Original = Terrain.SaveTerrain();
+    auto* Truck = Fleet[static_cast<int32>(EMudMachine::Truck)];
+    const FVector2D SavedPosition = Truck->Position;
+    const double SavedHeading = Truck->Heading;
+    const Earthwork::Load SavedCargo = Truck->Cargo;
+    const FVector2D Ford = Terrain.Fords.Last();
+    const int32 X0 = FMath::RoundToInt(Ford.X), Y0 = FMath::RoundToInt(Ford.Y);
+    constexpr int32 Reach = 27;
+    constexpr double Cap = 0.19;
+    const double Water = Terrain.WaterDepth(Ford) + Terrain.Height(Ford);
+    const auto Raw = Terrain.SurveyFordRoad(Ford);
+    const bool bRawBlocked = !Raw.IsReady() && Raw.Deep > 0 && Raw.Soft > 0 && Raw.Fill > 0 &&
+        Terrain.WaterDepth(Ford) > FordingLimit(1.05, DeliveryFraction);
+
+    double Profile[2 * Reach + 1];
+    for (int32 I = 0; I <= 2 * Reach; ++I)
+    {
+        double Z = Water + 0.04;
+        for (int32 Y = Y0 - 2; Y <= Y0 + 2; ++Y)
+            Z = FMath::Max(Z, Terrain.Height(FVector2D(X0 + I - Reach, Y)));
+        Profile[I] = Z;
+    }
+    for (int32 I = 1; I <= 2 * Reach; ++I)
+        Profile[I] = FMath::Max(Profile[I], Profile[I - 1] - 0.23);
+    for (int32 I = 2 * Reach - 1; I >= 0; --I)
+        Profile[I] = FMath::Max(Profile[I], Profile[I + 1] - 0.23);
+    for (int32 I = 0; I <= 2 * Reach; ++I)
+        for (int32 Y = Y0 - 2; Y <= Y0 + 2; ++Y)
+        {
+            const FVector2D Point(X0 + I - Reach, Y);
+            Earthwork::Load Soil;
+            Soil.Add(Material::Soil, FMath::Max(0.0, Profile[I] - Terrain.Height(Point)));
+            Terrain.Deposit(Point, 0.49, Soil);
+        }
+    const auto SoilSurvey = Terrain.SurveyFordRoad(Ford);
+    const bool bSoilFails = !SoilSurvey.IsReady() && SoilSurvey.Soft > 0 && SoilSurvey.Deep == 0 && SoilSurvey.Rough == 0;
+    Earthwork::Load Gravel;
+    Gravel.Add(Material::Gravel, Cap);
+    for (int32 X = X0 - Reach; X <= X0 + Reach; ++X)
+        for (int32 Y = Y0 - 2; Y <= Y0 + 2; ++Y)
+            Terrain.Deposit(FVector2D(X, Y), 0.49, Gravel);
+    const auto Built = Terrain.SurveyFordRoad(Ford);
+    const auto Graded = Terrain.SaveTerrain();
+    Earthwork::Load Ridge;
+    Ridge.Add(Material::Gravel, 0.70);
+    for (int32 Y = Y0 - 4; Y <= Y0 + 4; ++Y)
+        Terrain.Deposit(FVector2D(X0, Y), 0.49, Ridge);
+    const auto RidgeSurvey = Terrain.SurveyFordRoad(Ford);
+    const bool bRidgeFails = !RidgeSurvey.IsReady() && RidgeSurvey.Rough > 0 && RidgeSurvey.Deep == 0 && RidgeSurvey.Soft == 0;
+    const bool bGradeRestored = Terrain.RestoreTerrain(Graded);
+
+    Truck->StopWork();
+    Truck->Position = FVector2D(X0 - Reach + 4, Y0);
+    Truck->Heading = 0;
+    Truck->Cargo = {};
+    Truck->Cargo.Add(Material::Gravel, Truck->Capacity() * 0.9);
+    Truck->UpdatePose(Terrain);
+    for (int32 I = 0; I < 960 && Truck->Position.X < X0 + Reach - 3; ++I)
+        Truck->Drive(FixedStep, 1, 0, false, Terrain, Fleet);
+    const bool bTruckPassed = Truck->Position.X >= X0 + Reach - 3 && Truck->RolledSide == 0;
+    const double Travel = Truck->Position.X - (X0 - Reach + 4);
+    const bool bRestored = Terrain.RestoreTerrain(Original);
+    Truck->StopWork();
+    Truck->Position = SavedPosition;
+    Truck->Heading = SavedHeading;
+    Truck->RolledSide = 0;
+    Truck->Cargo = SavedCargo;
+    Truck->UpdatePose(Terrain);
+    UE_LOG(LogTemp, Display, TEXT("Gravel crossing: raw blocked %d, soil fails %d, ridge fails %d, finished %.0f%%, truck %.1f m (%d)"),
+        bRawBlocked, bSoilFails, bRidgeFails, double(Built.Progress()), Travel, bTruckPassed);
+    return bRawBlocked && bSoilFails && bRidgeFails && bGradeRestored && Built.IsReady() && Built.Fill == 0 && bTruckPassed && bRestored;
 }
 
 bool TestWheelSteering(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
@@ -236,11 +327,7 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
     const FVector2D Center = XY(Terrain.Start);
     const auto GroundVolume = [&]()
     {
-        double Total = 0;
-        for (int32 Y = -18; Y <= 18; ++Y)
-            for (int32 X = -18; X <= 18; ++X)
-                Total += Terrain.Height(Center + FVector2D(X, Y));
-        return Total;
+        return Terrain.MaterialVolumeBalance();
     };
     const double Before = GroundVolume();
     auto* Excavator = Fleet[1];
@@ -260,7 +347,8 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
         }
     }
     const double Dig = Excavator->Cargo.Volume();
-    const bool bDug = Dig > 1.2 && Sweep > 0.85 && FMath::IsNearlyEqual(Before - GroundVolume(), Dig, 0.005);
+    const bool bDug = Dig > 0.25 && Dig <= Excavator->Capacity() && Sweep > 0.85 &&
+        FMath::IsNearlyEqual(Before - GroundVolume(), Dig, 0.005);
     Excavator->ToggleUnload();
     for (int32 I = 0; I < 225; ++I)
         Excavator->Work(FixedStep, 0, 0, Terrain, Fleet);
@@ -323,7 +411,7 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
     for (int32 I = 0; I < 225; ++I)
         Excavator->Work(FixedStep, 0, 0, Terrain, Fleet);
     const double BedLoad = Dumper->Cargo.Volume();
-    const bool bLoadedBed = BedLoad > 1.2 && FMath::IsNearlyEqual(SecondBucket, BedLoad, 0.002) &&
+    const bool bLoadedBed = SecondBucket > 0.25 && FMath::IsNearlyEqual(SecondBucket, BedLoad, 0.002) &&
         Excavator->Cargo.Volume() < Epsilon && FMath::IsNearlyEqual(Before - GroundVolume(), BedLoad, 0.005);
     Dumper->Position = Center + FVector2D(12, 7);
     Dumper->UpdatePose(Terrain);
@@ -350,18 +438,19 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
     MachineMotion::AccumulateMouseDrag(LeftDrag, true, false, MachineMotion::MouseTool::Excavator, 0.6, 0.6);
     for (int32 I = 0; I < 18; ++I)
         Excavator->Work(FixedStep, 0, 0, Terrain, Fleet, LeftDrag);
-    const bool bMouseArm = Excavator->Boom > StartBoom + 1 && Excavator->Swing > StartSwing + 1 &&
-        FMath::IsNearlyEqual(StartCurl, Excavator->Curl) && FMath::IsNearlyEqual(StartStick, Excavator->Stick);
+    const bool bMouseArm = Excavator->Boom > StartBoom + 1 && Excavator->Curl > StartCurl + 1 &&
+        FMath::IsNearlyEqual(StartSwing, Excavator->Swing) && FMath::IsNearlyEqual(StartStick, Excavator->Stick);
 
     Excavator->ChangeGroup();
     Excavator->Halt();
     const double RaisedBoom = Excavator->Boom, TurnedSwing = Excavator->Swing;
+    const double CurledBucket = Excavator->Curl;
     MachineMotion::HydraulicInput RightDrag;
     MachineMotion::AccumulateMouseDrag(RightDrag, false, true, MachineMotion::MouseTool::Excavator, 0.6, 0.6);
     for (int32 I = 0; I < 18; ++I)
         Excavator->Work(FixedStep, 0, 0, Terrain, Fleet, RightDrag);
-    const bool bMouseBucket = Excavator->Curl > StartCurl + 1 && Excavator->Stick > StartStick + 1 &&
-        FMath::IsNearlyEqual(RaisedBoom, Excavator->Boom) && FMath::IsNearlyEqual(TurnedSwing, Excavator->Swing);
+    const bool bMouseBucket = Excavator->Swing > TurnedSwing + 1 && Excavator->Stick > StartStick + 1 &&
+        FMath::IsNearlyEqual(RaisedBoom, Excavator->Boom) && FMath::IsNearlyEqual(CurledBucket, Excavator->Curl);
     Excavator->Halt();
     const FVector FlatEdge = Excavator->ToolPoint();
     MachineMotion::HydraulicInput TiltDrag;
@@ -412,7 +501,10 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
     const double PileGround = GroundVolume();
     Loader->Speed = 1.1;
     for (int32 I = 0; I < 55; ++I)
+    {
+        Loader->Drive(FixedStep, 0.4, 0, false, Terrain, Fleet);
         Loader->Work(FixedStep, 0, 0, Terrain, Fleet);
+    }
     const double Loaded = Loader->Cargo.Volume();
     const bool bLoaderScoop = Loaded > 0.25 && FMath::IsNearlyEqual(PileGround - GroundVolume(), Loaded, 0.005);
     Loader->Halt();
@@ -465,14 +557,19 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
     const FVector2D BladeEdge = XY(Dozer->ToolPoint());
     Terrain.Deposit(BladeEdge, 1.1, PushPile);
     const double BeforeOverflow = GroundVolume();
+    const double FullBladeVolume=Dozer->Cargo.Volume();
     const FVector2D RightBank = BladeEdge + FVector2D(-0.65, 2.55);
     const FVector2D LeftBank = BladeEdge + FVector2D(-0.65, -2.55);
     const double RightBefore = Terrain.Height(RightBank), LeftBefore = Terrain.Height(LeftBank);
     for (int32 I = 0; I < 32; ++I)
+    {
+        Dozer->Drive(FixedStep, 0.5, 0, false, Terrain, Fleet);
         Dozer->Work(FixedStep, 0, 0, Terrain, Fleet);
+    }
     const double RightGain = Terrain.Height(RightBank) - RightBefore, LeftGain = Terrain.Height(LeftBank) - LeftBefore;
-    const bool bFullPush = RightGain > 0.05 && LeftGain > 0.025 && FMath::IsNearlyEqual(Dozer->Cargo.Volume(), Dozer->Capacity(), 0.005) &&
-        FMath::IsNearlyEqual(BeforeOverflow, GroundVolume(), 0.005);
+    const bool bFullPush = RightGain > 0.005 && LeftGain > 0.005 && Dozer->Cargo.Volume()>Dozer->Capacity()*.5 &&
+        Dozer->Cargo.Volume()<=Dozer->Capacity()+Epsilon&&
+        FMath::IsNearlyEqual(BeforeOverflow+FullBladeVolume,GroundVolume()+Dozer->Cargo.Volume(),0.00001);
 
     Excavator->StopWork();
     Excavator->Position = Center + FVector2D(-11, -9);
@@ -538,12 +635,30 @@ void AMudOperator::BeginPlay()
             FPlatformMisc::RequestExitWithStatus(false, 1);
         return;
     }
+    ProfileWorldId=Terrain->GetWorldId();
+    if(FParse::Param(FCommandLine::Get(),TEXT("MudSoilLab")))ProfileWorldId.RemoveFromEnd(TEXT("-soil-lab"));
+    if(ProfileWorldId.IsEmpty())ProfileWorldId=TEXT("Default");
     OnFoot = XY(Terrain->Start);
     for (int32 Id = 0; Id < UE_ARRAY_COUNT(ParkingOffsets); ++Id)
     {
         auto* Machine = GetWorld()->SpawnActor<AMudMachine>();
         Machine->Initialize(static_cast<EMudMachine>(Id), OnFoot + ParkingOffsets[Id], *Terrain);
         Fleet.Add(Machine);
+    }
+    if(FParse::Param(FCommandLine::Get(),TEXT("MudWorldValidation")))
+    {
+        bInitializeFailed=true; // The diagnostic actor owns the simulation; no player autosave is armed.
+        auto* Validation=GetWorld()->SpawnActor<AMudWorldValidation>();Validation->Initialize(Terrain);
+        return;
+    }
+    if (FParse::Param(FCommandLine::Get(), TEXT("MudSoilValidation")))
+    {
+        const bool Passed = RunSoilValidation(*Terrain, Fleet);
+        FString Report;
+        if (FParse::Value(FCommandLine::Get(), TEXT("MudSmokeReport="), Report))
+            FFileHelper::SaveStringToFile(Passed ? TEXT("passed") : TEXT("failed"), *Report);
+        FPlatformMisc::RequestExitWithStatus(false, Passed ? 0 : 1);
+        return;
     }
     if (bSmoke)
     {
@@ -573,8 +688,9 @@ void AMudOperator::BeginPlay()
         const bool bTrackMarks = TestTrackMarks(*Terrain);
         const bool bFallingLoad = TestFallingLoad(*Terrain);
         const bool bSteering = Fleet.Num() == UE_ARRAY_COUNT(ParkingOffsets) && TestWheelSteering(*Terrain, Fleet);
+        const bool bRoad = Fleet.Num() == UE_ARRAY_COUNT(ParkingOffsets) && TestGravelRoad(*Terrain, Fleet);
         bool bPassed = Fleet.Num() == UE_ARRAY_COUNT(ParkingOffsets) && bRaised && bRestored && FMath::IsNearlyEqual(Removed, 2.0, 0.002)
-            && TestMachineWork(*Terrain, Fleet) && bSteering && bTrackMarks && bFallingLoad && bFillFinish && bCutFinish && bSavedFinish;
+            && TestMachineWork(*Terrain, Fleet) && bSteering && bRoad && bTrackMarks && bFallingLoad && bFillFinish && bCutFinish && bSavedFinish;
         Active = INDEX_NONE;
         auto* PC = GetWorld()->GetFirstPlayerController();
         const bool bTabSwitch = PC && !Fleet.IsEmpty() && TestVehicleSwitch(*this, *PC);
@@ -597,24 +713,38 @@ void AMudOperator::BeginPlay()
     }
     if (FParse::Param(FCommandLine::Get(), TEXT("MudHighResolution")))
         ApplyQualityMode(true);
-    if (FParse::Param(FCommandLine::Get(), TEXT("MudBenchmark")) && !Terrain->Fords.IsEmpty() && !Terrain->Piles.IsEmpty())
+    const bool bBenchmark = FParse::Param(FCommandLine::Get(), TEXT("MudBenchmark"));
+    if (bBenchmark && !Terrain->Fords.IsEmpty() && !Terrain->Piles.IsEmpty())
     {
         // Capture a representative workload at the southern crossing.
         Active = 2;
         auto* Dumper = GetMachine();
         const auto Ford = Terrain->Fords.Last();
-        Dumper->Position = Ford + FVector2D(-9.5, 2);
+        Dumper->Position = Terrain->IsSoilLab() ? FVector2D(210, 800) : Ford + FVector2D(-9.5, 2);
         Dumper->Heading = 180;
         Dumper->UpdatePose(*Terrain);
         BenchmarkFrames.Reserve(9600);
         BenchmarkLast = BenchmarkStart = FPlatformTime::Seconds();
         bShowHelp = false;
     }
-    Terrain->UpdateTiles(GetPosition());
     InitializeFootAvatar();
     ResetFootMotion(LookYaw);
-    UpdateCamera();
     Audio->Initialize();
+    if (!bBenchmark && GetWorld()->WorldType == EWorldType::Game)
+    {
+        if (IFileManager::Get().FileExists(*LoadPath()))
+            bProtectSave = !RestoreProgress();
+        NextAutosave = FPlatformTime::Seconds() + AutosaveInterval;
+    }
+    Terrain->UpdateTiles(GetPosition());
+    UpdateCamera();
+}
+
+void AMudOperator::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+    if (EndPlayReason == EEndPlayReason::Quit && NextAutosave > 0 && !bProtectSave)
+        WriteProgress();
+    Super::EndPlay(EndPlayReason);
 }
 
 AMudMachine* AMudOperator::GetMachine() const { return Fleet.IsValidIndex(Active) ? Fleet[Active] : nullptr; }
@@ -658,8 +788,8 @@ void AMudOperator::Tick(float Dt)
                 MachineMotion::AddExcavatorKeys(Direct, Shift, double(Held(EKeys::K)) - double(Held(EKeys::M)),
                     double(Held(EKeys::J)) - double(Held(EKeys::N)));
             }
-            MachineMotion::AccumulateMouseDrag(Direct, bPadHydraulics, bPadSecondHydraulics,
-                MachineMotion::MouseTool::Excavator, PadHydraulicB, PadHydraulicA);
+            MachineMotion::AccumulateExcavatorGamepad(Direct, bPadHydraulics, bPadSecondHydraulics,
+                PadHydraulicB, PadHydraulicA);
         }
         else
         {
@@ -674,6 +804,12 @@ void AMudOperator::Tick(float Dt)
     const FVector2D Location = GetPosition();
     Terrain->UpdateTiles(Location);
     Terrain->UpdateSpills(FMath::Min(Dt, 0.1f));
+    Terrain->UpdateEnvironment(Location,FMath::Min(Dt,0.1f));
+    if (NextAutosave > 0 && !bProtectSave && FPlatformTime::Seconds() >= NextAutosave)
+    {
+        NextAutosave = FPlatformTime::Seconds() + AutosaveInterval;
+        Notify(WriteProgress() ? TEXT("Progress autosaved.") : TEXT("Could not autosave progress."));
+    }
     const int32 Width = Terrain->GetWorldSize();
     if (Location.X < 0 || Location.Y < 0 || Location.X > Width || Location.Y > Width)
         return;
@@ -687,6 +823,7 @@ void AMudOperator::Step(double Dt, const FVector2D& Hydraulics, const MachineMot
 {
     TRACE_CPUPROFILER_EVENT_SCOPE(MudSimulationStep);
     Terrain->AdvancePours(Dt);
+    Terrain->AdvanceSoil(Dt);
     auto* Machine = GetMachine();
     if (Machine)
     {
@@ -752,12 +889,13 @@ void AMudOperator::Step(double Dt, const FVector2D& Hydraulics, const MachineMot
             bDelivery = false;
         else if (FVector2D::DistSquared(Truck->Position, XY(Terrain->Start)) < FMath::Square(22.0))
             bDelivery = true;
-        if (bDelivery && Truck->RolledSide == 0 &&
+        if (bDelivery && Terrain->IsRoadReady() && Truck->RolledSide == 0 &&
             FVector2D::DistSquared(Truck->Position, XY(Terrain->Goal)) < FMath::Square(12.0))
         {
             bFinished = true;
             Notify(TEXT("Delivery complete. The valley road is open."));
-            Save();
+            if (NextAutosave > 0 && !bProtectSave)
+                WriteProgress();
             Audio->Interface(TEXT("Goal"));
         }
     }
@@ -811,7 +949,11 @@ void AMudOperator::UpdateBenchmark()
     const double Current = FPlatformTime::Seconds();
     const double Elapsed = Current - BenchmarkStart;
     if (Elapsed > 3.0)
+    {
         BenchmarkFrames.Add((Current - BenchmarkLast) * 1000.0);
+        BenchmarkSoilTimes.Add(Terrain->SoilStepMilliseconds);
+        BenchmarkActiveCells.Add(Terrain->ActiveSoilCells());
+    }
     BenchmarkLast = Current;
     auto* Dumper = Fleet[2];
     if (Dumper->Cargo.Volume() < 0.05)
@@ -828,12 +970,12 @@ void AMudOperator::UpdateBenchmark()
     BenchmarkStart = 0;
     if (BenchmarkFrames.IsEmpty())
         return;
-    FString Csv = TEXT("frame,ms\n");
+    FString Csv = TEXT("frame,ms,soil_step_ms,active_cells\n");
     double Sum = 0;
     for (int32 I = 0; I < BenchmarkFrames.Num(); ++I)
     {
         Sum += BenchmarkFrames[I];
-        Csv += FString::Printf(TEXT("%d,%.4f\n"), I + 1, BenchmarkFrames[I]);
+        Csv += FString::Printf(TEXT("%d,%.4f,%.5f,%d\n"), I + 1, BenchmarkFrames[I], BenchmarkSoilTimes[I], BenchmarkActiveCells[I]);
     }
     BenchmarkFrames.Sort();
     const double P99 = BenchmarkFrames[FMath::CeilToInt(BenchmarkFrames.Num() * 0.99) - 1];
@@ -843,7 +985,14 @@ void AMudOperator::UpdateBenchmark()
     IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
     const bool bSaved = FFileHelper::SaveStringToFile(Csv, *Path);
     UE_LOG(LogTemp, Display, TEXT("%s | %s"), *Summary, bSaved ? *Path : TEXT("CSV write failed"));
+    const auto Memory=FPlatformMemory::GetStats();
+    const auto Size=GEngine->GameViewport&&GEngine->GameViewport->Viewport?GEngine->GameViewport->Viewport->GetSizeXY():FIntPoint::ZeroValue;
+    const auto* RenderScale=IConsoleManager::Get().FindConsoleVariable(TEXT("r.ScreenPercentage"));
+    UE_LOG(LogTemp,Display,TEXT("Benchmark environment: %s, %dx%d, %.1f%% screen percentage, peak process physical %.1f MiB"),
+        *Terrain->GetWorldId(),Size.X,Size.Y,RenderScale?RenderScale->GetFloat():0,Memory.PeakUsedPhysical/1048576.0);
     Notify(Summary);
+    if (FParse::Param(FCommandLine::Get(), TEXT("MudBenchmarkExit")))
+        FPlatformMisc::RequestExit(false);
 }
 
 void AMudOperator::MoveMouseX(float Value)
@@ -1060,16 +1209,72 @@ void AMudOperator::Unload()
 
 void AMudOperator::Recover()
 {
-    if (auto* Machine = GetMachine())
+    if (!Terrain || bInitializeFailed)
+        return;
+    auto* Machine = GetMachine();
+    if (!Machine)
     {
-        Machine->Position = XY(Terrain->Start) + ParkingOffsets[Active];
-        Machine->Heading = 0;
-        Machine->RolledSide = 0;
-        Machine->StopWork();
-        bDepotLoad = bCruise = false;
-        Machine->UpdatePose(*Terrain);
-        Notify(TEXT("Recovered to the start yard."));
+        Notify(TEXT("Enter a vehicle to recover it."));
+        return;
     }
+
+    const FVector2D Parking = XY(Terrain->Start) + ParkingOffsets[Active];
+    const auto IsClear = [&](FVector2D Position)
+    {
+        constexpr double Radius = 1.85;
+        const double Limit = Terrain->GetWorldSize() - 6;
+        if (Position.X < 6 || Position.Y < 6 || Position.X > Limit || Position.Y > Limit)
+            return false;
+        for (double Along : {-3.7, 0.0, 3.7})
+        {
+            const FVector2D Probe = Position + FVector2D(Along, 0);
+            if (Terrain->WaterDepth(Probe) > 0.15 || Terrain->Normal(Probe).Z < 0.92 ||
+                Terrain->HitsTree(Probe, Radius, false))
+                return false;
+            const double Height = Terrain->Height(Probe);
+            for (const auto* Other : Fleet)
+                if (Other != Machine && Other->BlocksPedestrian(Probe, Height, Radius))
+                    return false;
+        }
+        return true;
+    };
+
+    FVector2D Destination = Parking;
+    if (!IsClear(Destination))
+    {
+        // Try the closest positions first when another machine is parked in the usual spot.
+        bool bFound = false;
+        for (const FVector2D Offset : {FVector2D(10, 0), FVector2D(-10, 0), FVector2D(0, 8), FVector2D(0, -8),
+            FVector2D(20, 0), FVector2D(-20, 0), FVector2D(0, 16), FVector2D(0, -16)})
+        {
+            Destination = Parking + Offset;
+            if (IsClear(Destination))
+            {
+                bFound = true;
+                break;
+            }
+        }
+        if (!bFound)
+        {
+            Notify(TEXT("No clear recovery spot at the start yard."));
+            return;
+        }
+    }
+
+    Machine->StopWork();
+    Machine->Position = Destination;
+    Machine->Heading = 0;
+    Machine->RolledSide = 0;
+    Machine->Boom = Machine->Kind == EMudMachine::Loader ? 5 : 15;
+    Machine->Stick = -28;
+    Machine->Curl = Machine->BucketTilt = Machine->Swing = Machine->Blade = 0;
+    bDepotLoad = bCruise = bBrake = false;
+    VerticalTap = HorizontalTap = {};
+    MouseHydraulics = {};
+    Machine->UpdatePose(*Terrain);
+    Terrain->UpdateTiles(Destination);
+    UpdateCamera();
+    Notify(TEXT("Current vehicle recovered to the start yard."));
 }
 
 void AMudOperator::Service()
@@ -1091,10 +1296,14 @@ void AMudOperator::Notify(const FString& Text)
 
 FString AMudOperator::MissionText() const
 {
+    if (Terrain && Terrain->IsSoilLab())
+        return TEXT("Soil lab: soil x150, sand x210, wet clay x250, gravel x285, rock x310. Y800. 9 for diagnostics.");
     if (bInitializeFailed)
         return TEXT("The valley could not be loaded. Rebuild the project assets.");
     if (bFinished)
         return TEXT("Delivery complete. Keep working the valley.");
+    if (!Terrain->IsRoadReady())
+        return TEXT("Build a gravel road at a marked ford. Level it with the dozer. Press 9 to survey.");
     if (bDelivery)
         return TEXT("Deliver the loaded truck to the red marker.");
     return TEXT("Prepare a crossing. Bring the truck to the yellow yard with at least 18 m3.");
@@ -1110,12 +1319,20 @@ FString AMudOperator::SurveyText() const
     FString Info = FString::Printf(TEXT("%s   |   Slope %.0f%%   |   Water %.2f m   |   Goal %.0f m"),
         MaterialName(Terrain->Surface(Position)), FVector2D(GradeX, GradeY).Size() * 100,
         Terrain->WaterDepth(Position), FVector2D::Distance(Position, XY(Terrain->Goal)));
-    if (bShowMap)
+    if (bShowMap && Terrain->IsSoilLab())
     {
-        for (const FVector2D Ford : Terrain->Fords)
+        double Balance = Terrain->MaterialBalance();
+        for (const auto* Vehicle : Fleet) Balance += Vehicle->Cargo.Mass();
+        Info += FString::Printf(TEXT(" | %d active | %.2f ms soil | balance %.6f t"),
+            Terrain->ActiveSoilCells(), Terrain->SoilStepMilliseconds, Balance);
+    }
+    if (bShowMap && !Terrain->HasRoadContract())
+    {
+        for (int32 I = 0; I < Terrain->Fords.Num(); ++I)
         {
-            const double Fill = Terrain->EstimateFordFill(Ford, 0.48);
-            Info += FString::Printf(TEXT("   |   %.0f m: ~%.0f m3 fill"), FVector2D::Distance(Position, Ford), Fill);
+            const FVector2D Ford = Terrain->Fords[I];
+            const double Fill = Terrain->EstimateFordFill(Ford, 0.44);
+            Info += FString::Printf(TEXT(" | %.0f m: ~%.0f m3 fill"), FVector2D::Distance(Position, Ford), Fill);
         }
     }
     return Info;
@@ -1125,14 +1342,28 @@ FString AMudOperator::StatusText() const { return MessageTime > 0 ? Message : FS
 
 void AMudOperator::Save()
 {
-    if (!Terrain || bInitializeFailed)
-        return;
+    if (WriteProgress())
+    {
+        bProtectSave = false;
+        if (NextAutosave > 0)
+            NextAutosave = FPlatformTime::Seconds() + AutosaveInterval;
+        Notify(TEXT("Progress saved."));
+    }
+    else
+        Notify(TEXT("Could not save progress."));
+}
+
+bool AMudOperator::WriteProgress() const
+{
+    if (!Terrain || bInitializeFailed || Fleet.Num() != UE_ARRAY_COUNT(ParkingOffsets))
+        return false;
     const auto Root = MakeShared<FJsonObject>();
     Root->SetNumberField(TEXT("version"), SaveVersion);
     Root->SetNumberField(TEXT("seed"), Terrain->GetSeed());
     Root->SetNumberField(TEXT("active"), Active);
     Root->SetNumberField(TEXT("footX"), OnFoot.X);
     Root->SetNumberField(TEXT("footY"), OnFoot.Y);
+    Root->SetNumberField(TEXT("footFacing"), FootFacing);
     Root->SetBoolField(TEXT("delivery"), bDelivery);
     Root->SetBoolField(TEXT("complete"), bFinished);
     Root->SetObjectField(TEXT("terrain"), Terrain->SaveTerrain());
@@ -1151,6 +1382,7 @@ void AMudOperator::Save()
         Row->SetNumberField(TEXT("bucketTilt"), Machine->BucketTilt);
         Row->SetNumberField(TEXT("swing"), Machine->Swing);
         Row->SetNumberField(TEXT("blade"), Machine->Blade);
+        Row->SetNumberField(TEXT("bladeYaw"), Machine->BladeYaw);
         Row->SetNumberField(TEXT("rolled"), Machine->RolledSide);
         TArray<TSharedPtr<FJsonValue>> Cargo;
         for (const double Volume : Machine->Cargo.Volumes)
@@ -1160,21 +1392,42 @@ void AMudOperator::Save()
     }
     Root->SetArrayField(TEXT("vehicles"), Vehicles);
     FString Json;
-    const FString Path = SavePath(), Temporary = Path + TEXT(".tmp");
+    const FString Path = SavePath();
+    const FString Temporary = FString::Printf(TEXT("%s.%u.tmp"), *Path, FPlatformProcess::GetCurrentProcessId());
     IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
     const auto Writer = TJsonWriterFactory<>::Create(&Json);
-    if (FJsonSerializer::Serialize(Root, Writer, true) &&
-        FFileHelper::SaveStringToFile(Json, *Temporary) &&
-        IFileManager::Get().Move(*Path, *Temporary, true, false, false, true))
-        Notify(bFinished ? TEXT("Delivery complete. Progress saved.") : TEXT("Progress saved."));
-    else
-        Notify(TEXT("Could not save progress."));
+    if (FJsonSerializer::Serialize(Root, Writer, true) && FFileHelper::SaveStringToFile(Json, *Temporary))
+    {
+#if PLATFORM_WINDOWS
+        // Replace the old save in place only after the new file has been written in full.
+        const FString Source = FPaths::ConvertRelativePathToFull(Temporary).Replace(TEXT("/"), TEXT("\\"));
+        const FString Destination = FPaths::ConvertRelativePathToFull(Path).Replace(TEXT("/"), TEXT("\\"));
+        if (::MoveFileExW(*Source, *Destination, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            return true;
+#else
+        if (IFileManager::Get().Move(*Path, *Temporary, true, false, false, true))
+            return true;
+#endif
+    }
+    IFileManager::Get().Delete(*Temporary, false, false, true);
+    UE_LOG(LogTemp, Warning, TEXT("Could not write the valley profile to %s"), *Path);
+    return false;
 }
 
 void AMudOperator::Load()
 {
+    if (RestoreProgress())
+    {
+        bProtectSave = false;
+        if (NextAutosave > 0)
+            NextAutosave = FPlatformTime::Seconds() + AutosaveInterval;
+    }
+}
+
+bool AMudOperator::RestoreProgress()
+{
     if (!Terrain || bInitializeFailed)
-        return;
+        return false;
     FString Json;
     TSharedPtr<FJsonObject> Root;
     int32 Version = 0, Seed = 0, Chosen = INDEX_NONE;
@@ -1191,12 +1444,12 @@ void AMudOperator::Load()
         !Root->TryGetObjectField(TEXT("terrain"), TerrainData))
     {
         Notify(TEXT("No compatible save found."));
-        return;
+        return false;
     }
     struct FRestore
     {
         FVector2D XY;
-        double Heading, Articulation, Boom, Stick, Curl, BucketTilt, Swing, Blade;
+        double Heading, Articulation, Boom, Stick, Curl, BucketTilt, Swing, Blade, BladeYaw;
         int32 RolledSide;
         Earthwork::Load Cargo;
     };
@@ -1221,26 +1474,29 @@ void AMudOperator::Load()
                 !FMath::IsFinite(Entry.BucketTilt) || FMath::Abs(Entry.BucketTilt) > MachineMotion::MaxBucketTilt)) ||
             !(*Row)->TryGetNumberField(TEXT("blade"), Entry.Blade) ||
             !(*Row)->TryGetNumberField(TEXT("rolled"), Entry.RolledSide) || FMath::Abs(Entry.RolledSide) > 1 ||
-            !(*Row)->TryGetArrayField(TEXT("cargo"), Cargo) || Cargo->Num() != MaterialCount)
+            !(*Row)->TryGetArrayField(TEXT("cargo"), Cargo) || (Cargo->Num() != 3 && Cargo->Num() != MaterialCount))
         {
             Notify(TEXT("Vehicle data in the save is invalid."));
-            return;
+            return false;
         }
-        for (size_t M = 0; M < MaterialCount; ++M)
+        for (int32 M = 0; M < Cargo->Num(); ++M)
         {
             if (!(*Cargo)[M]->TryGetNumber(Entry.Cargo.Volumes[M]) ||
                 !FMath::IsFinite(Entry.Cargo.Volumes[M]) || Entry.Cargo.Volumes[M] < 0 ||
                 Entry.Cargo.Volumes[M] > Fleet[Id]->Capacity())
             {
                 Notify(TEXT("Invalid cargo in the save."));
-                return;
+                return false;
             }
         }
         if (Entry.Cargo.Volume() > Fleet[Id]->Capacity() + Epsilon)
         {
             Notify(TEXT("Cargo exceeds vehicle capacity."));
-            return;
+            return false;
         }
+        if ((*Row)->HasField(TEXT("bladeYaw")) && (!(*Row)->TryGetNumberField(TEXT("bladeYaw"), Entry.BladeYaw) ||
+            !FMath::IsFinite(Entry.BladeYaw) || FMath::Abs(Entry.BladeYaw) > 25))
+            return false;
         Machines.Add(Entry);
     }
     if (Version == 2)
@@ -1251,13 +1507,15 @@ void AMudOperator::Load()
         Machines.Add(Loader);
     }
     FVector2D Foot;
+    double SavedFacing = LookYaw;
+    Root->TryGetNumberField(TEXT("footFacing"), SavedFacing);
     bool bSavedDelivery, bSavedComplete;
     if (!Root->TryGetNumberField(TEXT("footX"), Foot.X) || !Root->TryGetNumberField(TEXT("footY"), Foot.Y) ||
         !ValidPosition(Foot) || !Root->TryGetBoolField(TEXT("delivery"), bSavedDelivery) ||
         !Root->TryGetBoolField(TEXT("complete"), bSavedComplete) || !Terrain->RestoreTerrain(*TerrainData))
     {
         Notify(TEXT("Terrain data in the save is invalid."));
-        return;
+        return false;
     }
     for (int32 Id = 0; Id < Machines.Num(); ++Id)
     {
@@ -1271,6 +1529,7 @@ void AMudOperator::Load()
         Machine->BucketTilt = Entry.BucketTilt;
         Machine->Swing = Entry.Swing;
         Machine->Blade = Entry.Blade;
+        Machine->BladeYaw = Entry.BladeYaw;
         Machine->RolledSide = Entry.RolledSide;
         Machine->Cargo = Entry.Cargo;
         Machine->StopWork();
@@ -1282,7 +1541,7 @@ void AMudOperator::Load()
         SwitchCamera();
     Active = Chosen;
     OnFoot = Foot;
-    ResetFootMotion(LookYaw);
+    ResetFootMotion(FMath::IsFinite(SavedFacing) ? SavedFacing : LookYaw);
     if (!GetMachine())
         LookPitch = -12;
     UpdateCamera();
@@ -1290,6 +1549,7 @@ void AMudOperator::Load()
     bFinished = bSavedComplete;
     bDepotLoad = bCruise = false;
     Notify(TEXT("Progress restored."));
+    return true;
 }
 
 void AMudOperator::PerformanceMode()
@@ -1535,8 +1795,8 @@ void AMudHUD::DrawHUD()
                 (Machine->Kind == EMudMachine::Loader ? TEXT("Lower bucket and drive into the pile") : TEXT("R  Load at a pile    I  Auto tip")));
         Label(WorkHelp, Text, W - 353, H - 122);
         const TCHAR* MouseHelp = Machine->Kind == EMudMachine::Excavator ?
-            TEXT("Hold LMB  Boom / swing    RMB  Stick / bucket") :
-            (Machine->Kind == EMudMachine::Dozer ? TEXT("Hold mouse + drag up / down  Blade") :
+            TEXT("Hold LMB  Boom / bucket    RMB  Stick / swing") :
+            (Machine->Kind == EMudMachine::Dozer ? TEXT("Mouse or arrows: lift / angle blade") :
                 (Machine->Kind == EMudMachine::Loader ? TEXT("LMB up/down  Lift    LMB left/right or RMB up/down  Bucket") : TEXT("Mouse  Look around")));
         Label(MouseHelp, Text, W - 353, H - 101);
         Label(TEXT("C  Camera     9  Survey     Backspace  Recover"), Text, W - 353, H - 80);
