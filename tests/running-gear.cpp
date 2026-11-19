@@ -73,8 +73,17 @@ int main()
     const auto StraightPress = PressGround(0, 1, 1, 0.25, 0, true);
     Near(ContactSink(1, 0.1, 1, false), 0);
     Near(ContactSink(0, 1.0, 1, false), 0);
+    Near(ContactSink(1, 0.1, 1, false, 1), 0);
     assert(ContactSink(1, 1.0, 1, false) > ContactSink(1, 1.0, 0, false) * 2);
     assert(ContactSink(1, 0.95, 1, true) < ContactSink(1, 0.95, 1, false));
+    const double FreshMud = ContactSink(1, 0.95, 0, false);
+    const double ChurnedMud = ContactSink(1, 0.95, 0, false, 0.85);
+    assert(ChurnedMud > FreshMud * 2);
+    Near(MudMobility(0, 0.85, 1, false, false), 1);
+    assert(MudMobility(FreshMud, 0.25, 0, false, false) > 0.40);
+    Near(MudMobility(ChurnedMud, 0.12, 0, false, false), 0);
+    assert(MudMobility(0.31, 0.18, 0, false, true) > MudMobility(0.31, 0.18, 0, false, false));
+    assert(MudMobility(ContactSink(1, 0.95, 1, true, 0.85), 0.48, 1, true, false) > 0.30);
     assert(PressGround(0, 1, 1, 0.95, 0.6, false, 1.5).Depth > PressGround(0, 1, 1, 0.95, 0, false).Depth * 2);
     const auto TurningPress = PressGround(0, 1, 1, 0.25, 1, true);
     const auto MudPress = PressGround(0, 1, 1, 0.95, 1, true);
