@@ -178,8 +178,12 @@ bool AMudTerrain::Initialize()
     if(Data->TryGetArrayField(TEXT("geology"),Regions))for(const auto& V:*Regions)
     {
         const auto& R=*V->AsObject();
-        const auto Type=R.GetStringField(TEXT("material"))==TEXT("clay")?Material::Clay:Material::Sand;
-        Geology.Add({ReadXY(R),FVector2D(R.GetNumberField(TEXT("rx")),R.GetNumberField(TEXT("ry"))),Type,R.GetNumberField(TEXT("soilDepth"))});
+        const FString Name=R.GetStringField(TEXT("material"));
+        const auto Type=Name==TEXT("clay")?Material::Clay:Name==TEXT("sand")?Material::Sand:
+            Name==TEXT("gravel")?Material::Gravel:Name==TEXT("crushed-rock")?Material::Rock:Material::Soil;
+        const double RX=R.GetNumberField(TEXT("rx")),RY=R.GetNumberField(TEXT("ry")),Depth=R.GetNumberField(TEXT("soilDepth"));
+        if(RX<=0||RY<=0||Depth<0||Depth>256)return false;
+        Geology.Add({ReadXY(R),FVector2D(RX,RY),Type,Depth});
     }
     BoulderMesh->SetStaticMesh(LoadObject<UStaticMesh>(nullptr,TEXT("/Engine/BasicShapes/Sphere.Sphere")));
     BoulderMesh->SetMaterial(0,GeneratedMaterial(TEXT("LooseRock")));
@@ -495,7 +499,8 @@ Earthwork::Column AMudTerrain::OriginalColumn(int32 Cell) const
         for(const auto& R:Geology)if(FVector2D((XY.X-R.XY.X)/R.Radii.X,(XY.Y-R.XY.Y)/R.Radii.Y).SizeSquared()<1){Type=R.Type;Depth=R.Depth;}
         double Deposit=0;Material Cover=Material::Soil;
         for(const auto& P:Piles){const double D=P.Height*(1-FVector2D::Distance(P.Center,XY)/P.Radius);if(D>0){Deposit=D;Cover=P.Material;break;}}
-        Column Result{Original[Cell]-Deposit-32,{}};Result.Add(Material::Rock,32-Depth);Result.Add(Type,Depth);Result.Add(Cover,Deposit);return Result;
+        const double ColumnDepth=FMath::Max(32.0,Depth+8.0);
+        Column Result{Original[Cell]-Deposit-ColumnDepth,{}};Result.Add(Material::Rock,ColumnDepth-Depth);Result.Add(Type,Depth);Result.Add(Cover,Deposit);return Result;
     }
     for (const FMudPile& Pile : Piles)
     {

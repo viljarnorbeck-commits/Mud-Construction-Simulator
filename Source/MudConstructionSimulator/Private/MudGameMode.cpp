@@ -1329,6 +1329,8 @@ FString AMudOperator::MissionText() const
         return TEXT("Build a gravel road at a marked ford. Level it with the dozer. Press 9 to survey.");
     if (bDelivery)
         return TEXT("Deliver the loaded truck to the red marker.");
+    if (Terrain->GetWorldId().StartsWith(TEXT("earthworks-v3-")))
+        return TEXT("Cut a route through the earth bank, fill the ravine and reinforce soft ground. Load the truck at the yellow yard; deliver to red.");
     return TEXT("Prepare a crossing. Bring the truck to the yellow yard with at least 18 m3.");
 }
 

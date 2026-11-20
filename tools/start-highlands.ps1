@@ -1,11 +1,12 @@
 [CmdletBinding()]
 param(
     [ValidateSet('Play','Validate','Regression','Benchmark')][string]$Mode='Play',
-    [string]$EngineRoot='C:/Program Files/Epic Games/UE_5.7'
+    [string]$EngineRoot='C:/Program Files/Epic Games/UE_5.7',
+    [ValidateSet('earthworks-42','highlands-42')][string]$World='earthworks-42'
 )
 $ErrorActionPreference='Stop'
 $root=(Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-$source=Join-Path $root 'world/highlands-42'
+$source=Join-Path $root ('world/'+$World)
 $content=Join-Path $root 'Content/World'
 [void](New-Item -ItemType Directory -Force -Path $content)
 foreach($file in @('height.png','overview.png','world.json')) {
@@ -22,7 +23,7 @@ $results=Join-Path $root ('Saved/HighlandsTests/'+[Guid]::NewGuid().ToString('N'
 [void](New-Item -ItemType Directory -Force -Path $results)
 $log=Join-Path $results 'Highlands.log'
 $arguments=@(('"{0}"' -f (Join-Path $root 'MudConstructionSimulator.uproject')),
-    '/Game/Generated/Valley','-game','-NoLiveCoding',('-abslog="{0}"' -f $log))
+    '/Game/Generated/Valley','-game','-NoLiveCoding','-NoTraceServer',('-abslog="{0}"' -f $log))
 if($isTest) {
     $report=Join-Path $results 'Result.txt'
     $flag=if($Mode -eq 'Validate'){'-MudWorldValidation'}else{'-MudSmokeTest'}

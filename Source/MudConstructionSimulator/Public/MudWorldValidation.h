@@ -18,4 +18,5 @@ private:
     bool Complete=false;
     void Finish(bool Passed);
     bool TestMobility();
+    bool TestGeneratedEarthwork();
 };
