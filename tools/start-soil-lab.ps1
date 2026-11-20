@@ -19,7 +19,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $projectRoot 'Binaries/Win64/UnrealE
 $results = Join-Path $projectRoot ('Saved/SoilTests/' + [Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $results -Force)
 $log = Join-Path $results 'SoilLab.log'
-$arguments = @(('"{0}"' -f $project), '/Game/Generated/Valley', '-game', '-MudSoilLab', ('-abslog="{0}"' -f $log))
+$arguments = @(('"{0}"' -f $project), '/Game/Generated/Valley', '-game', '-NoLiveCoding', '-MudSoilLab', ('-abslog="{0}"' -f $log))
 if ($Mode -eq 'Validate') {
     $report = Join-Path $results 'Acceptance.txt'
     $arguments += @('-NullRHI', '-nosound', '-unattended', '-MudSoilValidation', ('-MudSmokeReport="{0}"' -f $report))

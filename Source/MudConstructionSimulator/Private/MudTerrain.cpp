@@ -1,4 +1,5 @@
 #include "MudTerrain.h"
+#include "TerrainSurface.h"
 #include "MudMachine.h"
 
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
@@ -43,9 +44,9 @@ FLinearColor GroundMasks(Material Type, double Moisture, double SlopeUp, FVector
     const double Wet = FMath::SmoothStep(0.12, 0.77, Moisture);
     const double Growth = bUndisturbed ? FMath::SmoothStep(0.20, 0.73, Patch)
         * FMath::SmoothStep(0.66, 0.94, SlopeUp) * (1.0 - Wet) : 0.0;
-    const double Aggregate = IsAggregate(Type) ? 1.0 : 0.0;
-    const double Tone = (Type == Material::Rock ? 0.24 : (Type == Material::Sand ? 0.95 : Type == Material::Clay ? 0.18 : 0.57)) + 0.35 * FMath::PerlinNoise2D(XY * 0.065)
-        + 0.15 * FMath::PerlinNoise2D(XY * 0.29);
+    const double Aggregate = Type == Material::Gravel ? 1.0 : 0.0;
+    const double Tone = 0.52 + 0.16 * FMath::PerlinNoise2D(XY * 0.036)
+        + 0.06 * FMath::PerlinNoise2D(XY * 0.11);
     // Ground material decodes cover, aggregate, patch tone and moisture from RGBA.
     return FLinearColor(Growth, Aggregate, FMath::Clamp(Tone, 0.0, 1.0), Wet);
 }
@@ -147,6 +148,7 @@ bool AMudTerrain::Initialize()
     for (int32 Cell = 0; Cell < Original.Num(); ++Cell)
         Original[Cell] = FMath::Lerp(Minimum, Maximum, Readings[Cell] / 65535.0);
     Heights = Original;
+    SurfaceHalfSamples.Reset();
     SoilFlow.Reset(Samples);
     Start = ReadPosition(*Data->GetObjectField(TEXT("start")));
     Goal = ReadPosition(*Data->GetObjectField(TEXT("goal")));
@@ -284,7 +286,7 @@ bool AMudTerrain::Initialize()
     }
 
     TerrainMeshes.SetNum(TilesPerSide * TilesPerSide);
-    TileSteps.Init(0, TerrainMeshes.Num());
+    TileSteps.Init(-1, TerrainMeshes.Num());
     for (int32 Id = 0; Id < TerrainMeshes.Num(); ++Id)
         BuildTile(Id, 4);
     BuildWater();
@@ -303,29 +305,41 @@ double AMudTerrain::Height(FVector2D XY) const
     return MeshHeight(XY);
 }
 
+double AMudTerrain::SurfaceSample(int32 X, int32 Y) const
+{
+    const int32 FineSize = Samples * 2 - 1;
+    X = FMath::Clamp(X, 0, FineSize-1); Y = FMath::Clamp(Y, 0, FineSize-1);
+    if ((X % 2) == 0 && (Y % 2) == 0) return Heights[Index(X/2,Y/2)];
+    const int32 Key = Y * FineSize + X;
+    if (const float* Cached = SurfaceHalfSamples.Find(Key)) return *Cached;
+    const float Value = TerrainSurface::Reconstruct(X * 0.5, Y * 0.5, [this](int I, int J)
+    { return Heights[Index(FMath::Clamp(I,0,Samples-1), FMath::Clamp(J,0,Samples-1))]; });
+    SurfaceHalfSamples.Add(Key, Value);
+    return Value;
+}
+
 double AMudTerrain::MeshHeight(FVector2D XY, FVector* SurfaceNormal) const
 {
-    XY.X = FMath::Clamp(XY.X, 0.0, static_cast<double>(GetWorldSize()));
-    XY.Y = FMath::Clamp(XY.Y, 0.0, static_cast<double>(GetWorldSize()));
-    const int32 X = FMath::Min(FMath::FloorToInt(XY.X), Samples - 2);
-    const int32 Y = FMath::Min(FMath::FloorToInt(XY.Y), Samples - 2);
-    const double U = XY.X - X, V = XY.Y - Y;
-    const double SW = Heights[Index(X, Y)], SE = Heights[Index(X + 1, Y)];
-    const double NW = Heights[Index(X, Y + 1)], NE = Heights[Index(X + 1, Y + 1)];
-    // The near terrain mesh splits each metre square along the SE–NW diagonal.
-    const bool bLower = U + V <= 1.0;
-    const double DX = bLower ? SE - SW : NE - NW;
-    const double DY = bLower ? NW - SW : NE - SE;
+    const double X = FMath::Clamp(XY.X*2, 0.0, (Samples-1)*2.0);
+    const double Y = FMath::Clamp(XY.Y*2, 0.0, (Samples-1)*2.0);
+    const int32 I = FMath::Min(FMath::FloorToInt(X), (Samples-1)*2-1);
+    const int32 J = FMath::Min(FMath::FloorToInt(Y), (Samples-1)*2-1);
+    const double U = X-I, V = Y-J;
+    const double SW = SurfaceSample(I,J), SE = SurfaceSample(I+1,J);
+    const double NW = SurfaceSample(I,J+1), NE = SurfaceSample(I+1,J+1);
     if (SurfaceNormal)
-        *SurfaceNormal = FVector(-DX, -DY, 1.0).GetSafeNormal();
-    return bLower ? SW + U * DX + V * DY : NE - (1.0 - U) * DX - (1.0 - V) * DY;
+    {
+        const double DX = (U+V <= 1 ? SE-SW : NE-NW)*2;
+        const double DY = (U+V <= 1 ? NW-SW : NE-SE)*2;
+        *SurfaceNormal = FVector(-DX,-DY,1).GetSafeNormal();
+    }
+    return TerrainSurface::Triangle(SW,SE,NW,NE,U,V);
 }
 
 FVector AMudTerrain::Normal(FVector2D XY) const
 {
-    return FVector(
-        Height(XY - FVector2D(1, 0)) - Height(XY + FVector2D(1, 0)),
-        Height(XY - FVector2D(0, 1)) - Height(XY + FVector2D(0, 1)), 2.0).GetSafeNormal();
+    return FVector(Height(XY-FVector2D(0.5,0))-Height(XY+FVector2D(0.5,0)),
+        Height(XY-FVector2D(0,0.5))-Height(XY+FVector2D(0,0.5)),1).GetSafeNormal();
 }
 
 AMudTerrain::FRiverSample AMudTerrain::RiverAt(double Y) const
@@ -517,15 +531,31 @@ void AMudTerrain::UpdateCell(int32 Cell, double WorkDelta)
 
 void AMudTerrain::DirtyCell(int32 Cell)
 {
+    const int32 CX = Cell % Samples, CY = Cell / Samples, FineSize = Samples*2-1;
+    for (int32 Y = FMath::Max(0,CY*2-4); Y <= FMath::Min(FineSize-1,CY*2+4); ++Y)
+        for (int32 X = FMath::Max(0,CX*2-4); X <= FMath::Min(FineSize-1,CX*2+4); ++X)
+            if (X%2 || Y%2) SurfaceHalfSamples.Remove(Y*FineSize+X);
     if (const int32* Plant = PlantByCell.Find(Cell))
         DirtyPlants.Add(*Plant);
     const int32 X = Cell % Samples, Y = Cell / Samples;
     if (!bRubbleDirty && !WorkFinish.IsEmpty() &&
         FVector2D::DistSquared(RubbleFocus, FVector2D(X, Y)) <= FMath::Square(RubbleRadius + 2.0))
         bRubbleDirty = true;
-    for (const int32 DX : {-1, 1})
-        for (const int32 DY : {-1, 1})
-            Dirty.Add(TileIndex(X + DX, Y + DY));
+    for (const int32 DX : {-3, 3})
+        for (const int32 DY : {-3, 3})
+        {
+            const int32 Id=TileIndex(X+DX,Y+DY);
+            Dirty.Add(Id);
+            const int32 X0=(Id%TilesPerSide)*TileSize,Y0=(Id/TilesPerSide)*TileSize;
+            const FIntRect Area(FMath::Clamp(X-X0-3,0,TileSize),FMath::Clamp(Y-Y0-3,0,TileSize),
+                FMath::Clamp(X-X0+4,0,TileSize+1),FMath::Clamp(Y-Y0+4,0,TileSize+1));
+            if (auto* Previous=DirtyRegions.Find(Id))
+            {
+                Previous->Min.X=FMath::Min(Previous->Min.X,Area.Min.X); Previous->Min.Y=FMath::Min(Previous->Min.Y,Area.Min.Y);
+                Previous->Max.X=FMath::Max(Previous->Max.X,Area.Max.X); Previous->Max.Y=FMath::Max(Previous->Max.Y,Area.Max.Y);
+            }
+            else DirtyRegions.Add(Id,Area);
+        }
 }
 
 TArray<int32> AMudTerrain::Cells(FVector2D XY, double Radius) const
@@ -917,7 +947,8 @@ void AMudTerrain::ShowSpill(FVector Origin, double Volume, Material Type, FVecto
             Forward * SpillRandom.FRandRange(0.22, 1.85) + FVector(0, 0, SpillRandom.FRandRange(-0.4, 0.88));
         Clump.Velocity *= ThrowScale;
         Clump.Life = 1.65;
-        Clump.Radius = Type == Material::Gravel ? SpillRandom.FRandRange(0.025, 0.074) : SpillRandom.FRandRange(0.045, 0.16);
+        Clump.Radius = Type == Material::Gravel ? SpillRandom.FRandRange(0.018, 0.050) :
+            Type == Material::Rock ? SpillRandom.FRandRange(0.06, 0.14) : SpillRandom.FRandRange(0.018, 0.055);
         Clump.Spin = SpillRandom.FRandRange(-180, 180);
         Clump.FloorZ = FloorZ;
         Clump.bBounced = false;
@@ -927,6 +958,7 @@ void AMudTerrain::ShowSpill(FVector Origin, double Volume, Material Type, FVecto
 
 void AMudTerrain::UpdateSpills(double Dt)
 {
+    UpdatePourSurfaces();
     for (int32 Kind = 0; Kind < Spoil.Num(); ++Kind)
     {
         auto& Batch = Spills[Kind];
@@ -1144,111 +1176,127 @@ const AMudTerrain::FMudRoadSurvey* AMudTerrain::GetRoadSurvey(int32 FordIndex) c
 void AMudTerrain::BuildTile(int32 Id, int32 Step)
 {
     TRACE_CPUPROFILER_EVENT_SCOPE(MudRebuildTerrainTile);
-    const int32 X0 = (Id % TilesPerSide) * TileSize, Y0 = (Id / TilesPerSide) * TileSize;
-    const int32 Edge = TileSize / Step + 1;
+    const int32 X0 = (Id % TilesPerSide)*TileSize, Y0 = (Id / TilesPerSide)*TileSize;
+    const double Spacing = Step == 0 ? 0.5 : Step;
+    const int32 Cells = FMath::RoundToInt(TileSize/Spacing), Edge = Cells+1;
     TArray<FVector> Vertices, Normals;
     TArray<int32> Triangles;
-    TArray<FVector2D> UV, FinishMasks;
+    TArray<FVector2D> UV, FinishMasks, MineralMasks, RockMasks;
     TArray<FLinearColor> Colors;
     TArray<FProcMeshTangent> Tangents;
-    const int32 BorderCount = (Edge - 1) * 4;
-    const int32 VertexCount = Edge * Edge + BorderCount;
-    Vertices.Reserve(VertexCount);
-    Normals.Reserve(VertexCount);
-    UV.Reserve(VertexCount);
-    FinishMasks.Reserve(VertexCount);
-    Colors.Reserve(VertexCount);
-    Tangents.Reserve(VertexCount);
-    Triangles.Reserve(6 * ((Edge - 1) * (Edge - 1) + BorderCount));
-    for (int32 Y = 0; Y < Edge; ++Y)
+    const int32 Reserve = Edge*Edge + Cells*4*20;
+    Vertices.Reserve(Reserve); Normals.Reserve(Reserve); UV.Reserve(Reserve);
+    FinishMasks.Reserve(Reserve); MineralMasks.Reserve(Reserve); RockMasks.Reserve(Reserve);
+    Colors.Reserve(Reserve); Tangents.Reserve(Reserve); Triangles.Reserve(Cells*Cells*6+Cells*96);
+    struct FCoating { FLinearColor Color; FVector2D Finish, Minerals, Rock; };
+    TMap<int32,FCoating> Coatings;
+    const auto Read = [&](int32 X, int32 Y) -> FCoating
     {
-        for (int32 X = 0; X < Edge; ++X)
+        X = FMath::Clamp(X,0,Samples-1); Y = FMath::Clamp(Y,0,Samples-1);
+        const int32 Cell = Index(X,Y);
+        if (const auto* Cached = Coatings.Find(Cell)) return *Cached;
+        const FVector2D XY(X,Y);
+        const Material Kind = Surface(XY);
+        const double Z = Heights[Cell], Finish = WorkFinish.FindRef(Cell), Wet = Wetness(XY);
+        const FVector Up = Normal(XY);
+        bool Grass = Kind == Material::Soil && FMath::Abs(Original[Cell]-Z)<0.035 && FMath::Abs(Finish)<0.16;
+        for (const auto& Pile : Piles) Grass &= FVector2D::DistSquared(XY,Pile.Center)>=FMath::Square(Pile.Radius);
+        auto Color = GroundMasks(Kind,FMath::Max(Wet,FMath::Clamp((Original[Cell]-Z)*0.70,0.0,0.38)),Up.Z,XY,Grass);
+        const float Rut = FMath::SmoothStep(0.03f,0.54f,TrackWear.FindRef(Cell)/255.0f);
+        Color.R *= 1-0.94f*Rut; Color.B *= 1-0.15f*Rut;
+        Color.A = FMath::Max(Color.A,static_cast<float>(Wet*0.97*Rut));
+        FCoating Value{Color, {FMath::Max(0.0,-Finish), FMath::Max(0.0,Finish)},
+            {Kind==Material::Sand ? 1.0 : 0.0, Kind==Material::Clay ? 1.0 : 0.0},
+            {Kind==Material::Rock ? 1.0 : 0.0,0}};
+        Coatings.Add(Cell,Value); return Value;
+    };
+    const auto Add = [&](double X, double Y, int32 Destination=INDEX_NONE)
+    {
+        const FVector2D XY(X0+X,Y0+Y);
+        const int32 GX = FMath::FloorToInt(XY.X), GY = FMath::FloorToInt(XY.Y);
+        const double U = XY.X-GX, V = XY.Y-GY;
+        const FCoating A=Read(GX,GY), B=Read(GX+1,GY), C=Read(GX,GY+1), D=Read(GX+1,GY+1);
+        const auto Blend2 = [U,V](FVector2D A,FVector2D B,FVector2D C,FVector2D D)
+        { return FMath::Lerp(FMath::Lerp(A,B,U),FMath::Lerp(C,D,U),V); };
+        const FVector Up = Normal(XY);
+        const int32 Index=Destination==INDEX_NONE ? Vertices.Num() : Destination;
+        if (Destination==INDEX_NONE)
         {
-            const int32 GX = X0 + X * Step, GY = Y0 + Y * Step;
-            const FVector2D XY(GX, GY);
-            const int32 Cell = Index(GX, GY);
-            const double Z = Heights[Cell];
-            const Material Kind = Surface(XY);
-            const double Finish = WorkFinish.FindRef(Cell);
-            bool bGrass = Kind == Material::Soil && FMath::Abs(Original[Cell] - Z) < 0.035 &&
-                FMath::Abs(Finish) < 0.16;
-            for (const FMudPile& Pile : Piles)
-                bGrass &= FVector2D::DistSquared(XY, Pile.Center) >= FMath::Square(Pile.Radius);
-            Vertices.Emplace(X * Step * 100.0, Y * Step * 100.0, Z * 100.0);
-            const FVector Up = Normal(XY);
-            Normals.Add(Up);
-            UV.Add(XY);
-            FinishMasks.Emplace(FMath::Max(0.0, -Finish), FMath::Max(0.0, Finish));
-            const double Exposed = FMath::Clamp((Original[Cell] - Z) * 0.95, 0.0, 0.52);
-            const double Wet = Wetness(XY);
-            FLinearColor Masks = GroundMasks(Kind, FMath::Max(Wet, Exposed), Up.Z, XY, bGrass);
-            const float Wear = TrackWear.FindRef(Cell) / 255.0f;
-            const float Rut = FMath::SmoothStep(0.03f, 0.54f, Wear);
-            Masks.R *= 1.0f - 0.97f * Rut;
-            Masks.B *= 1.0f - 0.54f * Rut;
-            Masks.A = FMath::Max(Masks.A, static_cast<float>(Wet * 0.97 * Rut));
-            // Darken freshly exposed faces while keeping the flatter floor readable.
-            const double CutFace = FMath::Max(0.0, -Finish) * FMath::SmoothStep(0.06, 0.32, 1.0 - Up.Z);
-            Masks.B *= 1.0f - 0.50f * CutFace;
-            Colors.Add(Masks);
-            Tangents.Emplace(FVector::CrossProduct(FVector::RightVector, Up).GetSafeNormal(), false);
-            if (X == 0 || Y == 0)
-                continue;
-            const int32 I = Y * Edge + X;
-            Triangles.Append({ I - Edge - 1, I - 1, I - Edge, I - Edge, I - 1, I });
+            Vertices.AddUninitialized(); Normals.AddUninitialized(); UV.AddUninitialized();
+            Colors.AddUninitialized(); FinishMasks.AddUninitialized(); MineralMasks.AddUninitialized();
+            RockMasks.AddUninitialized(); Tangents.AddDefaulted();
         }
-    }
-    // Skirts close the seam when adjoining tiles use different sample intervals.
-    TArray<int32> Border;
-    Border.Reserve(BorderCount);
-    for (int32 I = 0; I < Edge - 1; ++I) Border.Add(I);
-    for (int32 I = 0; I < Edge - 1; ++I) Border.Add(I * Edge + Edge - 1);
-    for (int32 I = Edge - 1; I > 0; --I) Border.Add((Edge - 1) * Edge + I);
-    for (int32 I = Edge - 1; I > 0; --I) Border.Add(I * Edge);
-    const int32 Bottom = Vertices.Num();
-    for (int32 I : Border)
+        Vertices[Index]=FVector(X*100,Y*100,Height(XY)*100);
+        Normals[Index]=Up; UV[Index]=XY;
+        Colors[Index]=FMath::Lerp(FMath::Lerp(A.Color,B.Color,U),FMath::Lerp(C.Color,D.Color,U),V);
+        FinishMasks[Index]=Blend2(A.Finish,B.Finish,C.Finish,D.Finish);
+        MineralMasks[Index]=Blend2(A.Minerals,B.Minerals,C.Minerals,D.Minerals);
+        RockMasks[Index]=Blend2(A.Rock,B.Rock,C.Rock,D.Rock);
+        Tangents[Index]=FProcMeshTangent(FVector::CrossProduct(FVector::RightVector,Up).GetSafeNormal(),false);
+        return Index;
+    };
+    // Fixed near topology permits a local stencil update. Copy untouched vertex attributes
+    // from the existing section; only the changed cells and normal halo are reconstructed.
+    auto* Existing=TerrainMeshes[Id].Get();
+    const FIntRect* Region=DirtyRegions.Find(Id);
+    const auto* Section=Existing ? Existing->GetProcMeshSection(0) : nullptr;
+    if (Step==0 && TileSteps[Id]==0 && Region && Section && Section->ProcVertexBuffer.Num()==Edge*Edge)
     {
-        const FVector NormalCopy = Normals[I];
-        const FVector2D UVCopy = UV[I];
-        const FVector2D FinishCopy = FinishMasks[I];
-        const FLinearColor ColorCopy = Colors[I];
-        const FProcMeshTangent TangentCopy = Tangents[I];
-        Vertices.Add(Vertices[I] - FVector(0, 0, 350));
-        Normals.Add(NormalCopy);
-        UV.Add(UVCopy);
-        FinishMasks.Add(FinishCopy);
-        Colors.Add(ColorCopy);
-        Tangents.Add(TangentCopy);
+        const int32 Count=Section->ProcVertexBuffer.Num();
+        Vertices.SetNumUninitialized(Count); Normals.SetNumUninitialized(Count); UV.SetNumUninitialized(Count);
+        FinishMasks.SetNumUninitialized(Count); MineralMasks.SetNumUninitialized(Count); RockMasks.SetNumUninitialized(Count);
+        Colors.SetNumUninitialized(Count); Tangents.SetNumUninitialized(Count);
+        for (int32 I=0; I<Count; ++I)
+        {
+            const auto& V=Section->ProcVertexBuffer[I];
+            Vertices[I]=V.Position; Normals[I]=V.Normal; UV[I]=V.UV0;
+            FinishMasks[I]=V.UV1; MineralMasks[I]=V.UV2; RockMasks[I]=V.UV3;
+            Colors[I]=V.Color.ReinterpretAsLinear(); Tangents[I]=V.Tangent;
+        }
+        for (int32 Y=Region->Min.Y*2; Y<=FMath::Min(Edge-1,Region->Max.Y*2); ++Y)
+            for (int32 X=Region->Min.X*2; X<=FMath::Min(Edge-1,Region->Max.X*2); ++X)
+                Add(X*Spacing,Y*Spacing,Y*Edge+X);
+        Existing->UpdateMeshSection_LinearColor(0,Vertices,Normals,UV,FinishMasks,MineralMasks,RockMasks,Colors,Tangents,false);
+        DirtyRegions.Remove(Id); return;
     }
-    for (int32 I = 0; I < Border.Num(); ++I)
-    {
-        const int32 Next = (I + 1) % Border.Num();
-        Triangles.Append({ Border[I], Border[Next], Bottom + I, Bottom + I, Border[Next], Bottom + Next });
-    }
-
+    for (int32 Y=0; Y<Edge; ++Y) for (int32 X=0; X<Edge; ++X) Add(X*Spacing,Y*Spacing);
+    for (int32 Y=0; Y<Cells; ++Y)
+        for (int32 X=0; X<Cells; ++X)
+        {
+            const int32 SW=Y*Edge+X, SE=SW+1, NW=SW+Edge, NE=NW+1;
+            if (Step==0 || (X>0 && Y>0 && X<Cells-1 && Y<Cells-1))
+            { Triangles.Append({SW,NW,SE,SE,NW,NE}); continue; }
+            // Every LOD shares the exact same half-metre boundary. No skirts or T-junctions.
+            TArray<int32,TInlineAllocator<40>> Ring;
+            Ring.Add(SW);
+            if (X==0) for (double T=0.5; T<Spacing; T+=0.5) Ring.Add(Add(X*Spacing,Y*Spacing+T));
+            Ring.Add(NW);
+            if (Y==Cells-1) for (double T=0.5; T<Spacing; T+=0.5) Ring.Add(Add(X*Spacing+T,(Y+1)*Spacing));
+            Ring.Add(NE);
+            if (X==Cells-1) for (double T=Spacing-0.5; T>0; T-=0.5) Ring.Add(Add((X+1)*Spacing,Y*Spacing+T));
+            Ring.Add(SE);
+            if (Y==0) for (double T=Spacing-0.5; T>0; T-=0.5) Ring.Add(Add(X*Spacing+T,Y*Spacing));
+            const int32 Center=Add((X+0.5)*Spacing,(Y+0.5)*Spacing);
+            for (int32 I=0; I<Ring.Num(); ++I) Triangles.Append({Center,Ring[I],Ring[(I+1)%Ring.Num()]});
+        }
     auto* Mesh = TerrainMeshes[Id].Get();
     if (!Mesh)
     {
-        Mesh = NewObject<UProceduralMeshComponent>(this);
-        TerrainMeshes[Id] = Mesh;
-        Mesh->SetupAttachment(RootComponent);
-        Mesh->SetRelativeLocation(FVector(X0 * 100.0, Y0 * 100.0, 0));
-        Mesh->bUseAsyncCooking = true;
-        Mesh->bUseComplexAsSimpleCollision = true;
-        Mesh->SetMaterial(0, GroundMaterial);
-        Mesh->RegisterComponent();
+        Mesh=NewObject<UProceduralMeshComponent>(this); TerrainMeshes[Id]=Mesh;
+        Mesh->SetupAttachment(RootComponent); Mesh->SetRelativeLocation(FVector(X0*100,Y0*100,0));
+        Mesh->bUseAsyncCooking=true; Mesh->bUseComplexAsSimpleCollision=true;
+        Mesh->SetMaterial(0,GroundMaterial); Mesh->RegisterComponent();
     }
-    if (TileSteps[Id] == Step)
-    {
-        Mesh->UpdateMeshSection_LinearColor(0, Vertices, Normals, UV, FinishMasks, {}, {}, Colors, Tangents, false);
-    }
+    if (TileSteps[Id]==Step)
+        Mesh->UpdateMeshSection_LinearColor(0,Vertices,Normals,UV,FinishMasks,MineralMasks,RockMasks,Colors,Tangents,false);
     else
     {
-        Mesh->SetCollisionEnabled(Step == 1 ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
-        Mesh->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, UV, FinishMasks, {}, {},
-            Colors, Tangents, Step == 1, false);
+        Mesh->SetCollisionEnabled(Step==0 ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
+        Mesh->CreateMeshSection_LinearColor(0,Vertices,Triangles,Normals,UV,FinishMasks,MineralMasks,RockMasks,
+            Colors,Tangents,Step==0,false);
     }
-    TileSteps[Id] = Step;
+    TileSteps[Id]=Step;
+    DirtyRegions.Remove(Id);
 }
 
 void AMudTerrain::BuildGroundCover()
@@ -1373,12 +1421,13 @@ void AMudTerrain::UpdateGroundRubble(FVector2D Focus)
         const float Finish = WorkFinish.FindRef(Cell);
         const FVector2D Center(Cell % Samples, Cell / Samples);
         const Material Kind = Surface(Center);
+        if (Kind == Material::Sand || Kind == Material::Clay) continue;
         auto& Pieces = Transforms[static_cast<uint8>(Kind)];
         if (Pieces.Num() >= MaxPiecesPerMaterial || TrackWear.FindRef(Cell) >= 105)
             continue;
 
         FRandomStream Scatter(static_cast<int32>(HashCombineFast(GetTypeHash(Seed), GetTypeHash(Cell))));
-        const double Density = Kind == Material::Soil ? (Finish > 0 ? 0.62 : 0.28) : 0.85;
+        const double Density = Kind == Material::Soil ? (Finish > 0 ? 0.18 : 0.08) : 0.50;
         const double Work = FMath::Abs(Finish);
         if (Scatter.FRand() > Density * (Work < 0.30 ? 0.49 : Work))
             continue;
@@ -1391,8 +1440,8 @@ void AMudTerrain::UpdateGroundRubble(FVector2D Focus)
         if (Up.Z < 0.68)
             continue;
 
-        const double Scale = Kind == Material::Gravel ? Scatter.FRandRange(0.07, 0.16) :
-            Scatter.FRandRange(0.12, Kind == Material::Rock ? 0.38 : 0.27);
+        const double Scale = Kind == Material::Gravel ? Scatter.FRandRange(0.035, 0.085) :
+            Scatter.FRandRange(0.045, Kind == Material::Rock ? 0.24 : 0.095);
         const FQuat Rotation = FQuat(Up, Scatter.FRandRange(0.0, 2.0 * PI)) *
             FQuat::FindBetweenNormals(FVector::UpVector, Up);
         const FVector Size = FVector(Scatter.FRandRange(0.8, 1.4), 1.0, Kind == Material::Soil ? 0.58 : 0.82) * Scale;
@@ -1430,7 +1479,10 @@ void AMudTerrain::UpdateTiles(FVector2D Focus)
     {
         const FVector2D Center((Id % TilesPerSide + 0.5) * TileSize, (Id / TilesPerSide + 0.5) * TileSize);
         const double Distance = FVector2D::DistSquared(Center, Focus);
-        const int32 Target = Distance < FMath::Square(TileSteps[Id] == 1 ? 170.0 : 145.0) ? 1 : 4;
+        const double Near = TileSteps[Id]==0 ? 110.0 : 95.0;
+        const int32 Target = Distance < FMath::Square(Near) ? 0 :
+            (Distance < FMath::Square(TileSteps[Id]<=1 ? 180.0 : 160.0) ? 1 :
+            (Distance < FMath::Square(TileSteps[Id]<=2 ? 300.0 : 275.0) ? 2 : 4));
         if (Dirty.Contains(Id) || TileSteps[Id] != Target)
             Candidates.Emplace(Distance, Id);
     }
@@ -1438,7 +1490,10 @@ void AMudTerrain::UpdateTiles(FVector2D Focus)
     for (int32 I = 0; I < FMath::Min(Candidates.Num(), 2); ++I)
     {
         const auto Entry = Candidates[I];
-        BuildTile(Entry.Value, Entry.Key < FMath::Square(TileSteps[Entry.Value] == 1 ? 170.0 : 145.0) ? 1 : 4);
+        const int32 Old = TileSteps[Entry.Value];
+        BuildTile(Entry.Value, Entry.Key < FMath::Square(Old==0 ? 110.0 : 95.0) ? 0 :
+            (Entry.Key < FMath::Square(Old<=1 ? 180.0 : 160.0) ? 1 :
+            (Entry.Key < FMath::Square(Old<=2 ? 300.0 : 275.0) ? 2 : 4)));
         Dirty.Remove(Entry.Value);
     }
     UpdateGroundRubble(Focus);
@@ -1737,6 +1792,7 @@ bool AMudTerrain::RestoreTerrain(const TSharedPtr<FJsonObject>& Data)
     bRubbleDirty = true;
     NextRubbleUpdate = 0;
     Heights = Original;
+    SurfaceHalfSamples.Reset();
     bRestoringTerrain=true;
     for (const auto& Entry : Changed)
     {

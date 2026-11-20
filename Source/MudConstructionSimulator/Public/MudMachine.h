@@ -167,9 +167,9 @@ private:
     static const FVector DozerPushPivot, DozerBladePin;
     static constexpr double DozerPushLength = 388;
     static constexpr double DozerPushHalfWidth = 156;
-    static constexpr int32 BladeHeapColumns = 15;
-    static constexpr int32 BladeHeapRows = 11;
-    static constexpr int32 BladeClodCount = 16;
+    static constexpr int32 BladeHeapColumns = 33;
+    static constexpr int32 BladeHeapRows = 21;
+    static constexpr int32 BladeClodCount = 10;
     static constexpr double TruckFrontAxleCm = 260;
     static constexpr double TruckFirstRearAxleCm = -155;
     static constexpr double TruckSecondRearAxleCm = -292;

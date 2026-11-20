@@ -31,6 +31,7 @@
 #include "MudWorldValidation.h"
 #include "LoaderValidation.h"
 #include "LoaderRig.h"
+#include "MudMaterialReview.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
@@ -257,6 +258,8 @@ bool TestGravelRoad(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
     Truck->UpdatePose(Terrain);
     for (int32 I = 0; I < 960 && Truck->Position.X < X0 + Reach - 3; ++I)
         Truck->Drive(FixedStep, 1, 0, false, Terrain, Fleet);
+    UE_LOG(LogTemp, Display, TEXT("Crossing contact: position %.2f/%.2f, water %.3f, grip %.3f, roll %d, speed %.3f"),
+        Truck->Position.X-X0,Truck->Position.Y-Y0,Terrain.WaterDepth(Truck->Position),Truck->Grip,Truck->RolledSide,Truck->Speed);
     const bool bTruckPassed = Truck->Position.X >= X0 + Reach - 3 && Truck->RolledSide == 0;
     const double Travel = Truck->Position.X - (X0 - Reach + 4);
     const bool bRestored = Terrain.RestoreTerrain(Original);
@@ -648,6 +651,13 @@ void AMudOperator::BeginPlay()
         Machine->Initialize(static_cast<EMudMachine>(Id), OnFoot + ParkingOffsets[Id], *Terrain);
         Fleet.Add(Machine);
     }
+    FString MaterialReviewFolder;
+    if (FParse::Value(FCommandLine::Get(),TEXT("MudMaterialReview="),MaterialReviewFolder))
+    {
+        bInitializeFailed=true; // Isolated rendering fixture; user progress is never loaded/saved.
+        GetWorld()->SpawnActor<AMudMaterialReview>()->Initialize(*Terrain,Fleet);
+        return;
+    }
     if(FParse::Param(FCommandLine::Get(),TEXT("MudWorldValidation")))
     {
         bInitializeFailed=true; // The diagnostic actor owns the simulation; no player autosave is armed.
@@ -707,6 +717,7 @@ void AMudOperator::BeginPlay()
         auto* PC = GetWorld()->GetFirstPlayerController();
         const bool bTabSwitch = PC && !Fleet.IsEmpty() && TestVehicleSwitch(*this, *PC);
         bPassed &= bTabSwitch;
+        bPassed &= Terrain->ValidateSurfaceRendering(XY(Terrain->Start));
         UE_LOG(LogTemp, Display, TEXT("Tab vehicle switching: %s"), bTabSwitch ? TEXT("passed") : TEXT("failed"));
         UE_LOG(LogTemp, Display, TEXT("Earthwork surface finish: fill %d, cut %d, save %d"), bFillFinish, bCutFinish, bSavedFinish);
         FString Report;

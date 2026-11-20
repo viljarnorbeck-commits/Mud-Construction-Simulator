@@ -404,7 +404,7 @@ void AMudMachine::UpdateCargoGrains(const UMeshComponent& Surface, double Fracti
     RenderedCargo = Cargo;
 
     const FTransform HeapPose = Surface.GetRelativeTransform();
-    const int32 Count = FMath::Max(7, FMath::RoundToInt((TipBed ? 84 : 51) * FMath::Sqrt(Fraction)));
+    const int32 Count = FMath::Max(7, FMath::RoundToInt((TipBed ? 34 : 21) * FMath::Sqrt(Fraction)));
     FRandomStream Scatter(631 + 47 * static_cast<int32>(Kind));
     TArray<FTransform> Fragments[MaterialCount];
     for (int32 I = 0; I < Count; ++I)
@@ -415,12 +415,13 @@ void AMudMachine::UpdateCargoGrains(const UMeshComponent& Surface, double Fracti
         while (Choice + 1 < MaterialCount && Slot >= Cumulative)
             Cumulative += Cargo.Volumes[++Choice] / Volume;
         const auto Type = static_cast<Material>(Choice);
+        if (Type == Material::Sand || Type == Material::Clay) continue;
         const double Radius = FMath::Sqrt(Scatter.FRand());
         const double Angle = Scatter.FRandRange(0, UE_TWO_PI);
         const double X = Radius * FMath::Cos(Angle) * 0.43, Y = Radius * FMath::Sin(Angle) * 0.44;
         const double SizeRoll = Scatter.FRand();
-        const double Size = (Type == Material::Gravel ? FMath::Lerp(0.042, 0.118, SizeRoll) :
-            Type == Material::Rock ? FMath::Lerp(0.092, 0.235, SizeRoll) : FMath::Lerp(0.075, 0.160, SizeRoll))
+        const double Size = (Type == Material::Gravel ? FMath::Lerp(0.025, 0.065, SizeRoll) :
+            Type == Material::Rock ? FMath::Lerp(0.092, 0.235, SizeRoll) : FMath::Lerp(0.028, 0.065, SizeRoll))
             * FMath::Lerp(0.54, 1.0, FMath::Sqrt(Fraction));
         const FVector Location = HeapPose.TransformPosition(FVector(X * 100, Y * 100, CargoHeapHeight(X, Y))) -
             FVector(0, 0, Size * 13.0);
@@ -1786,9 +1787,9 @@ void AMudMachine::UpdateBladeHeap(const AMudTerrain& Terrain, double Fraction)
             const double Crest = FMath::Lerp(0.75, 1.0, FMath::SmoothStep(0.0, 0.23, U))
                 * (1.0 - FMath::SmoothStep(0.23, 1.0 - Side * Side * 0.20, U));
             const double MovingX = X - Flow * 0.56;
-            const double Fold = FMath::PerlinNoise2D(FVector2D(MovingX * 3.7, Y * 3.0 + 1.2));
-            const double Ripples = FMath::PerlinNoise2D(FVector2D(MovingX * 7.4, Y * 6.0 - 4.1));
-            const double Height = Relief * Shoulder * Crest * (0.88 + Fold * 0.31 + Ripples * 0.11);
+            const double Fold = FMath::PerlinNoise2D(FVector2D(MovingX * 1.8, Y * 1.6 + 1.2));
+            const double Ripples = FMath::PerlinNoise2D(FVector2D(MovingX * 3.6, Y * 3.1 - 4.1));
+            const double Height = Relief * Shoulder * Crest * (0.94 + Fold * 0.15 + Ripples * 0.045);
             Vertices.Emplace(X * 100.0, Y * 100.0, (Ground - Anchor.Z + Height) * 100.0 - 2.0);
             UV.Emplace(MovingX * 0.65, Y * 0.65);
         }
@@ -1827,7 +1828,7 @@ void AMudMachine::UpdateBladeHeap(const AMudTerrain& Terrain, double Fraction)
             FMath::Clamp(GridY - Y, 0.0, 1.0));
         const double Envelope = FMath::SmoothStep(0.02, 0.14, U) * (1.0 - FMath::SmoothStep(0.75, 0.99, U))
             * (1.0 - FMath::SmoothStep(0.27, 0.48, FMath::Abs(V - 0.5)));
-        const double Size = FMath::Max(0.001, (0.085 + (I % 5) * 0.023) * FMath::Sqrt(Spread) * Envelope);
+        const double Size = FMath::Max(0.001, (0.035 + (I % 5) * 0.012) * FMath::Sqrt(Spread) * Envelope);
         const double Roll = FMath::Fmod(Flow * (186.0 + 12.0 * I) + I * 93.0, 360.0);
         Pieces.Emplace(FRotator(-Roll, I * 29.0, Lane * 36.0), Surface + FVector(0, 0, Size * 12.0), FVector(Size));
     }
