@@ -75,7 +75,32 @@ void AMudWorldValidation::Tick(float Dt)
     UE_LOG(LogTemp,Display,TEXT("Highlands Chaos: fallen %d, large resisted %d, undercut %d, blocks %d, disk restore %d, surface collision %d"),
         Fallen,Resisted,Undercut,Blocks,Restored,Collision);
     const bool Mobility=TestMobility();
-    Finish(Fallen&&Resisted&&Undercut&&Blocks&&Restored&&Collision&&Mobility);
+    const bool Earthwork=TestGeneratedEarthwork();
+    Finish(Fallen&&Resisted&&Undercut&&Blocks&&Restored&&Collision&&Mobility&&Earthwork);
+}
+
+bool AMudWorldValidation::TestGeneratedEarthwork()
+{
+    if(!Terrain->GetWorldId().StartsWith(TEXT("earthworks-v3-")))return true;
+    const auto Saved=Terrain->SaveTerrain();
+    const FVector2D Bank(239,1640),Ravine(337,1640);
+    const double BankBefore=Terrain->Height(Bank),RavineBefore=Terrain->Height(Ravine);
+    const double MassBefore=Terrain->MaterialBalance();
+    const double Wall=(Terrain->Height(Bank)-Terrain->Height(Bank-FVector2D(3,0)))/3;
+    const auto Soil=Terrain->Excavate(Bank,.49,40,BankBefore-6);
+    const bool SoftFace=Soil.Volume()>5.9&&Soil.Volumes[static_cast<size_t>(Earthwork::Material::Rock)]<.001;
+    Terrain->Deposit(Ravine,.49,Soil);
+    const bool Changed=Terrain->Height(Bank)<BankBefore-5.9&&Terrain->Height(Ravine)>RavineBefore+5.9;
+    const double Error=Terrain->MaterialBalance()-MassBefore;
+    // Round-trip the actual altered columns before restoring the original test snapshot.
+    const auto Worked=Terrain->SaveTerrain();
+    bool Restored=Terrain->RestoreTerrain(Worked)&&Terrain->Height(Bank)<BankBefore-5.9&&
+        Terrain->Height(Ravine)>RavineBefore+5.9;
+    Restored&=Terrain->RestoreTerrain(Saved)&&FMath::Abs(Terrain->Height(Bank)-BankBefore)<.001&&
+        FMath::Abs(Terrain->Height(Ravine)-RavineBefore)<.001;
+    UE_LOG(LogTemp,Display,TEXT("Earthworks generated bank: slope %.2f, excavated %.3f m3, soft %d, cut/fill %d, mass error %.9f t, restore %d"),
+        Wall,Soil.Volume(),SoftFace,Changed,Error,Restored);
+    return Wall>3&&SoftFace&&Changed&&FMath::Abs(Error)<.00001&&Restored;
 }
 
 bool AMudWorldValidation::TestMobility()

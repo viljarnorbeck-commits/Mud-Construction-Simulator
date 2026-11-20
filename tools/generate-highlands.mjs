@@ -1,8 +1,9 @@
 import {mkdirSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {deflateSync,crc32} from 'node:zlib';
-import {landscape,SIZE,MIN_Z,MAX_Z,smooth} from './highlands-terrain.mjs';
-const seed=Number(process.argv[2]??42), output=process.argv[3]??`world/highlands-${seed}`;
+const earthworks=process.argv.includes('--earthworks');
+const {landscape,SIZE,MIN_Z,MAX_Z,smooth}=await import(earthworks?'./earthworks-terrain.mjs':'./highlands-terrain.mjs');
+const seed=Number(process.argv[2]??42), output=process.argv[3]??`world/${earthworks?'earthworks':'highlands'}-${seed}`;
 if(!Number.isInteger(seed)||seed<0||seed>0xffffffff) throw Error('Invalid seed');
 const begin=performance.now(), L=landscape(seed), heights=new Float32Array(SIZE*SIZE);
 const heightRows=Buffer.alloc(SIZE*(SIZE*2+1)), overview=Buffer.alloc(SIZE*(SIZE*3+1));
@@ -38,15 +39,15 @@ for(let y=6;y<SIZE-6;y+=7)for(let x=6;x<SIZE-6;x+=7){
     boulders.push({x:tx,y:ty,z,radius:+(.55+L.hash(x+17,y-49)*1.5).toFixed(3)});
   }
 }
-const world={seed,worldId:`highlands-v2-${seed}`,dimensionsM:[SIZE-1,SIZE-1],
+const world={seed,worldId:`${earthworks?'earthworks-v3':'highlands-v2'}-${seed}`,dimensionsM:[SIZE-1,SIZE-1],
   heightmap:{file:'height.png',samples:SIZE,spacingM:1,minElevation:MIN_Z,maxElevation:MAX_Z,observedRangeM:[low,high]},
   start:L.start,goal:L.goal,roadContract:false,
   river:{centerline:Array.from({length:257},(_,i)=>({x:L.riverX(i*8),y:i*8,z:L.riverZ(i*8),width:L.riverWidth(i*8)})),
     fords:[820,1560].map(y=>({x:L.riverX(y),y,centerDepthM:1.6}))},
   creek:{centerline:Array.from({length:Math.floor((L.creekEnd-180)/4)+1},(_,i)=>L.creek(180+i*4))},
-  mudPits:L.pits,buildSites:L.pads,geology:[...L.pits.map(p=>({...p,material:'clay',soilDepth:3})),
+  mudPits:L.pits,buildSites:L.pads,geology:L.geology??[...L.pits.map(p=>({...p,material:'clay',soilDepth:3})),
     {x:1130,y:1650,rx:130,ry:140,material:'sand',soilDepth:5}],
-  challenges:[{name:'Mountain switchback',x:1660,y:580},{name:'Muddy valley',x:780,y:1570},
+  challenges:L.challenges??[{name:'Mountain switchback',x:1660,y:580},{name:'Muddy valley',x:780,y:1570},
     {name:'Forest passage',x:540,y:1100},{name:'Creek gorge',x:650,y:L.creek(650).y}],
   piles:L.piles.map(p=>({...p,volumeM3:Math.round(p.volumeM3)})),trees,boulders,
   generation:{seconds:(performance.now()-begin)/1000,steepFraction:steep/heights.length,gentleFraction:gentle/heights.length}};
@@ -57,4 +58,13 @@ function png(depth,type,rows){
 }
 mkdirSync(output,{recursive:true});writeFileSync(join(output,'height.png'),png(16,0,heightRows));
 writeFileSync(join(output,'overview.png'),png(8,2,overview));writeFileSync(join(output,'world.json'),JSON.stringify(world,null,2)+'\n');
+if(earthworks) {
+  // Quantized physical data consumed by the C++ earthwork/vehicle acceptance test.
+  const rows=['x,y,height'];
+  for(let x=190;x<=686;x++)for(let y=1635;y<=1645;y++) {
+    const z=MIN_Z+heightRows.readUInt16BE(y*(SIZE*2+1)+1+x*2)/65535*(MAX_Z-MIN_Z);
+    rows.push(`${x},${y},${z.toFixed(9)}`);
+  }
+  writeFileSync(join(output,'acceptance-profile.csv'),rows.join('\n')+'\n');
+}
 console.log(JSON.stringify({output,range:[low,high],trees:trees.length,boulders:boulders.length,...world.generation}));

@@ -11,6 +11,7 @@
 #include "MudTerrain.h"
 #include "ProceduralMeshComponent.h"
 #include "RunningGear.h"
+#include "TerrainPassage.h"
 
 namespace
 {
@@ -906,6 +907,25 @@ void AMudMachine::Drive(double Dt, double Throttle, double Steering, bool bBrake
         const double NextWater = Terrain.WaterDepth(Next);
         if (Next.X < 3 || Next.Y < 3 || Next.X > Terrain.GetWorldSize() - 3 || Next.Y > Terrain.GetWorldSize() - 3 ||
             (NextWater > WaterLimit && NextWater >= Water - 0.005))
+            return true;
+        // Use terrain geometry, not an arbitrary maximum slope or a scripted road flag.
+        // Tracks have a shorter supported span and can bridge sharper changes in grade.
+        const double Rear=bTruck?TruckRearSupportCm/100:bDumper?DumperBogieCm/100:bTracked?-1.6:-LoaderAxleCm/100;
+        const double Front=bTruck?TruckRearSupportCm/100+TruckWheelbaseM:bDumper?DumperFrontAxleCm/100:bTracked?1.6:LoaderAxleCm/100;
+        const double Clearance=(bTracked?.46:bDumper?.45:bTruck?.36:.40)-LoadFraction*.06-Sink*.45;
+        const auto Penetration=[&](FVector2D P,double Yaw,double Bend)
+        {
+            const FVector2D F=Horizontal(FRotator(0,Yaw,0).Vector()),R(-F.Y,F.X);
+            return TerrainPassage::BellyPenetration([&](double X,double Y)
+            {
+                const FVector2D Center=bArticulated&&X<HingeOffsetCm()/100?
+                    RearFramePoint(P,Yaw,Bend,X):P+F*X;
+                const FVector2D Side=bArticulated&&X<HingeOffsetCm()/100?
+                    Horizontal(FRotator(0,Yaw+Bend+90,0).Vector()):R;
+                return Terrain.Height(Center+Side*Y);
+            },Rear,Front,Info.Footprint,Clearance);
+        };
+        if(TerrainPassage::Grounds(Penetration(Position,Heading,Articulation),Penetration(Next,NextHeading,NextArticulation)))
             return true;
         if (bArticulated || bTruck)
         {
