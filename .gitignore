@@ -10,3 +10,5 @@
 *.sln
 *.VC.db
 __pycache__/
+
+/art/surfaces/Prepared/

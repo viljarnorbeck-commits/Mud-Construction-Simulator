@@ -85,6 +85,7 @@ public:
     double SoilStepMilliseconds = 0;
     double MaterialBalance() const;
     double MaterialVolumeBalance() const;
+    bool ValidateSurfaceRendering(FVector2D Focus);
     bool IsSoilLab() const { return bSoilLab; }
     void SettlePours();
     void Spread(FVector2D XY, FVector2D Across, FVector2D Reach, const Earthwork::Load& Load);
@@ -184,6 +185,8 @@ private:
     int32 CrownInstancesPerTree = CrownTiers;
     TArray<float> Original;
     TArray<float> Heights;
+    mutable TMap<int32, float> SurfaceHalfSamples;
+    double SurfaceSample(int32 X, int32 Y) const;
     TArray<FRiverSample> River;
     TArray<FRiverSample> Creek;
     TArray<FMudRoadSurvey> FordSurveys;
@@ -205,6 +208,7 @@ private:
     TMap<int32, int32> PlantByCell;
     TSet<int32> DirtyPlants;
     TArray<int32> TileSteps;
+    TMap<int32,FIntRect> DirtyRegions;
     FSpillBatch Spills[Earthwork::MaterialCount];
     TArray<FPour> Pours;
     TArray<TWeakObjectPtr<AMudMachine>> MaterialReceivers;
@@ -213,6 +217,9 @@ private:
     double NextRubbleUpdate = 0;
     bool bRubbleDirty = true;
     UPROPERTY() TArray<TObjectPtr<UProceduralMeshComponent>> TerrainMeshes;
+    UPROPERTY() TArray<TObjectPtr<UProceduralMeshComponent>> PourSurfaces;
+    bool bPourSurfacesVisible = false;
+    void UpdatePourSurfaces();
     UPROPERTY() TObjectPtr<UMaterialInterface> GroundMaterial;
     UPROPERTY() TObjectPtr<UHierarchicalInstancedStaticMeshComponent> Trunks;
     UPROPERTY() TObjectPtr<UHierarchicalInstancedStaticMeshComponent> Crowns;

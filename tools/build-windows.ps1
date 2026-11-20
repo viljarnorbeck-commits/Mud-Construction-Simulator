@@ -55,7 +55,7 @@ foreach ($file in 'height.png', 'overview.png', 'world.json') {
 }
 
 Invoke-BuildStep -Executable $build -Arguments @(
-    'MudConstructionSimulatorEditor', 'Win64', 'Development', "-Project=$project", '-WaitMutex'
+    'MudConstructionSimulatorEditor', 'Win64', 'Development', "-Project=$project", '-WaitMutex', '-ForceHeaderGeneration'
 )
 $bootstrap = Join-Path $PSScriptRoot 'bootstrap-unreal.py'
 Invoke-BuildStep -Executable $editor -Arguments @(

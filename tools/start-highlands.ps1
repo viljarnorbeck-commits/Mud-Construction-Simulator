@@ -22,7 +22,7 @@ $results=Join-Path $root ('Saved/HighlandsTests/'+[Guid]::NewGuid().ToString('N'
 [void](New-Item -ItemType Directory -Force -Path $results)
 $log=Join-Path $results 'Highlands.log'
 $arguments=@(('"{0}"' -f (Join-Path $root 'MudConstructionSimulator.uproject')),
-    '/Game/Generated/Valley','-game',('-abslog="{0}"' -f $log))
+    '/Game/Generated/Valley','-game','-NoLiveCoding',('-abslog="{0}"' -f $log))
 if($isTest) {
     $report=Join-Path $results 'Result.txt'
     $flag=if($Mode -eq 'Validate'){'-MudWorldValidation'}else{'-MudSmokeTest'}

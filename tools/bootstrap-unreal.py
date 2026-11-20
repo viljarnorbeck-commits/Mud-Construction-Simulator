@@ -41,12 +41,15 @@ def make_map():
     sun_light.set_editor_property("atmosphere_sun_light", True)
     sun_light.set_editor_property("dynamic_shadow_distance_movable_light", 19000)
     sun_light.set_editor_property("light_source_angle", 1.35)
+    sun_light.set_editor_property("dynamic_shadow_cascades", 4)
+    sun_light.set_editor_property("contact_shadow_length", 0.008)
+    sun_light.set_editor_property("shadow_bias", 0.65)
 
     sky = ensure_actor(unreal.SkyLight, (0, 0, 100))
     sky_light = sky.get_component_by_class(unreal.SkyLightComponent)
     sky_light.set_mobility(unreal.ComponentMobility.MOVABLE)
     sky_light.set_editor_property("real_time_capture", True)
-    sky_light.set_editor_property("intensity", 1.23)
+    sky_light.set_editor_property("intensity", 1.10)
     ensure_actor(unreal.SkyAtmosphere, (0, 0, 0))
 
     haze = ensure_actor(unreal.ExponentialHeightFog, (0, 0, 1300))
