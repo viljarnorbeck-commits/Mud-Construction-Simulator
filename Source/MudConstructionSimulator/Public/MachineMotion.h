@@ -39,7 +39,8 @@ inline void AccumulateMouseDrag(HydraulicInput& Input, bool Left, bool Right, Mo
     if (Tool == MouseTool::Blade)
     {
         Input.Boom += Y;
-        Input.Swing += X;
+        if(Left&&Right)Input.Tilt+=X;
+        else Input.Swing += X;
         return;
     }
     if (Tool == MouseTool::Loader)

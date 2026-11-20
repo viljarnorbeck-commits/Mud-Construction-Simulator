@@ -21,6 +21,7 @@ private:
     FVector2D Center;
     FString Folder;
     int32 Frame=0;
+    bool bDozerReview=false;
     TArray<double> Timings;
     TArray<double> WorkTimings;
     void View(FVector Location,FVector Target);

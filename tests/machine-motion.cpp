@@ -55,6 +55,8 @@ int main()
     Near(Blade.Stick, 0);
     Near(Blade.Curl, 0);
     Near(Blade.Swing, 2.0);
+    AccumulateMouseDrag(Blade,true,true,MouseTool::Blade,.7,.2);
+    Near(Blade.Tilt,.7);Near(Blade.Swing,2.0);Near(Blade.Boom,-.1);
 
     HydraulicInput Loader;
     AccumulateMouseDrag(Loader, true, false, MouseTool::Loader, 0.8, 0.6);

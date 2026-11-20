@@ -84,7 +84,7 @@ struct SoilDrivetrain
     double WheelSpeed = 0;
 
     double Advance(double Speed, double Throttle, double SpeedLimit, double Grip, double Sink,
-        double Radius, double MassRatio, double Grade, bool Tracked, bool Brake, double Dt)
+        double Radius, double MassRatio, double Grade, bool Tracked, bool Brake, double Dt, double DraftAcceleration = 0)
     {
         if (Dt <= 0)
             return Speed;
@@ -97,7 +97,7 @@ struct SoilDrivetrain
         const double Friction = std::clamp(Grip, 0.02, 1.0) * Gravity * SlopeNormal * SupportedWeight;
         const double Compaction = Immersion * Immersion * (Tracked ? 6.0 : 10.0);
         const double Suction = Sink * 1.4 / (1.0 + std::abs(Speed) * 2.0);
-        const double Resistance = 0.025 * Gravity + Compaction + Suction + BellyDepth * 9.0;
+        const double Resistance = 0.025 * Gravity + Compaction + Suction + BellyDepth * 9.0 + std::max(0.0,DraftAcceleration);
         const double Downhill = -Gravity * Grade * SlopeNormal;
 
         constexpr double WheelInertia = 0.10;

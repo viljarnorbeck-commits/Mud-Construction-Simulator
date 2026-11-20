@@ -56,7 +56,7 @@ const TCHAR* ArrowHelp(const AMudMachine& Machine)
     switch (Machine.Kind)
     {
     case EMudMachine::Loader: return TEXT("Up/Down Lift    Left/Right Roll back / tip");
-    case EMudMachine::Dozer: return TEXT("Up/Down Blade    V Ground follow    G Mode");
+    case EMudMachine::Dozer: return TEXT("Up/Down Blade    Both mouse buttons + sideways: Tilt    V Grade hold    G Mode");
     case EMudMachine::Excavator: return Machine.bOtherGroup ? TEXT("Arrows: bucket / swing   G: change group") :
         TEXT("Arrows: boom / stick   G: change group");
     default: return TEXT("Up/Down Raise / lower bed    I Auto tip");
@@ -537,37 +537,44 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
     const bool bManualBed = bHeldBed && bLoweredBed && FMath::IsNearlyEqual(ManualDump, 1.0, 0.005);
     UE_LOG(LogTemp, Display, TEXT("Manual dump bed: held %d, lowered %d, dumped %.2f m3"), bHeldBed, bLoweredBed, ManualDump);
 
-    // A raised patch can meet the cutting edge before the manual lever offset reaches its old threshold.
+    // Isolate manual cutting from the angles left by the mouse-control checks.
     Dozer->StopWork();
     Dozer->Blade = 0;
+    Dozer->BladeYaw=Dozer->BucketTilt=0;
     Dozer->bGrade = false;
     Dozer->Heading = 0;
     Dozer->Position = Center + FVector2D(-14, -13);
     Dozer->UpdatePose(Terrain);
     Load PushPile;
-    PushPile.Add(Material::Gravel, 4.0);
-    Terrain.Deposit(XY(Dozer->ToolPoint()), 1.1, PushPile);
+    // A small, pushable stockpile; the overload/stall case is covered by world validation.
+    PushPile.Add(Material::Gravel, 1.6);
+    Terrain.Deposit(XY(Dozer->ToolPoint()), 1.4, PushPile);
     const double PushGround = GroundVolume();
-    for (int32 I = 0; I < 8; ++I)
+    for (int32 I = 0; I < 60; ++I)
         Dozer->Work(FixedStep, -1, 0, Terrain, Fleet);
-    for (int32 I = 0; I < 36; ++I)
+    const FVector2D ManualStart=Dozer->Position;
+    for (int32 I = 0; I < 90; ++I)
     {
         Dozer->Drive(FixedStep, 1, 0, false, Terrain, Fleet);
         Dozer->Work(FixedStep, 0, 0, Terrain, Fleet);
     }
     const double ManualPush = Dozer->Cargo.Volume();
-    const bool bManualPush = !Dozer->bTool && Dozer->Blade > -0.12 && ManualPush > 0.20 &&
+    const bool bManualPush = !Dozer->bTool && Dozer->Blade < -0.30 && ManualPush > 0.20 &&
         FMath::IsNearlyEqual(PushGround - GroundVolume(), ManualPush, 0.005);
+    UE_LOG(LogTemp,Display,TEXT("Manual dozer: travel %.3f m, blade %.3f, cargo %.3f m3, %s"),
+        FVector2D::Distance(ManualStart,Dozer->Position),Dozer->Blade,ManualPush,*Dozer->ToolDescription());
 
     Dozer->Cargo.Add(Material::Soil, Dozer->Capacity() - ManualPush);
     const FVector2D BladeEdge = XY(Dozer->ToolPoint());
-    Terrain.Deposit(BladeEdge, 1.1, PushPile);
+    // A full blade feeds a shallow windrow, rather than ramming a multi-metre face.
+    Load Windrow;Windrow.Add(Material::Gravel,.4);
+    Terrain.Deposit(BladeEdge, 1.8, Windrow);
     const double BeforeOverflow = GroundVolume();
     const double FullBladeVolume=Dozer->Cargo.Volume();
     const FVector2D RightBank = BladeEdge + FVector2D(-0.65, 2.55);
     const FVector2D LeftBank = BladeEdge + FVector2D(-0.65, -2.55);
     const double RightBefore = Terrain.Height(RightBank), LeftBefore = Terrain.Height(LeftBank);
-    for (int32 I = 0; I < 32; ++I)
+    for (int32 I = 0; I < 90; ++I)
     {
         Dozer->Drive(FixedStep, 0.5, 0, false, Terrain, Fleet);
         Dozer->Work(FixedStep, 0, 0, Terrain, Fleet);

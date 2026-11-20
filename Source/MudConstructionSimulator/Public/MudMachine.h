@@ -6,6 +6,7 @@
 #include "Earthwork.h"
 #include "MachineMotion.h"
 #include "RunningGear.h"
+#include "DozerRig.h"
 #include "MudMachine.generated.h"
 
 class AMudTerrain;
@@ -87,6 +88,7 @@ public:
     int32 RolledSide = 0;
 
 private:
+    friend class AMudWorldValidation;
     struct FWheelRig
     {
         USceneComponent* Hub;
@@ -151,7 +153,7 @@ private:
     void BuildTyreShell(USceneComponent* Hub, double WidthScale);
     void BuildWheelRim(USceneComponent* Hub, double Side, double WidthScale, const TCHAR* Paint);
     void BuildBucketEdge(double HalfToothSpan, FVector Lip);
-    void UpdateTrack(FTrackRig& Track);
+    void UpdateTrack(FTrackRig& Track, const AMudTerrain* Terrain = nullptr);
     void AnimateRunningGear(double Distance, double YawRadians, double FrontSteering, double RearDistance = 0, double RearYaw = 0);
     double HingeOffsetCm() const;
     FVector2D RearFramePoint(FVector2D Center, double FrontHeading, double RearAngle, double RearOffsetM) const;
@@ -165,8 +167,8 @@ private:
     double FindDigAngle(const AMudTerrain& Terrain, double TargetHeight) const;
     static const FVector BoomMount, StickMount, BucketMount, StickRamPin, BucketRamBase;
     static const FVector DozerPushPivot, DozerBladePin;
-    static constexpr double DozerPushLength = 388;
-    static constexpr double DozerPushHalfWidth = 156;
+    static constexpr double DozerPushLength = DozerRig::PushLength;
+    static constexpr double DozerPushHalfWidth = DozerRig::PushHalfWidth;
     static constexpr int32 BladeHeapColumns = 33;
     static constexpr int32 BladeHeapRows = 21;
     static constexpr int32 BladeClodCount = 10;
@@ -196,6 +198,7 @@ private:
     UPROPERTY() TObjectPtr<UStaticMeshComponent> BucketLink;
     UPROPERTY() TObjectPtr<USceneComponent> LoaderRocker;
     UPROPERTY() TObjectPtr<USceneComponent> DozerPushArms;
+    UPROPERTY() TObjectPtr<USceneComponent> DozerYawCarrier;
     UPROPERTY() TObjectPtr<USceneComponent> TipBed;
     UPROPERTY() TObjectPtr<USceneComponent> TruckTailgate;
     UPROPERTY() TObjectPtr<USceneComponent> RearFrame;
@@ -233,6 +236,9 @@ private:
     double ValveTilt = 0;
     double ValveSwing = 0;
     double MaterialMoved = 0;
+    double LastWorkVolume = 0;
+    double DraftForceKN = 0;
+    TOptional<FTransform> LastBladePose;
     TOptional<FVector> LastToolContact;
     float SoundTravel = 0;
     float SoundHydraulic = 0;

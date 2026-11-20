@@ -91,10 +91,13 @@ public:
     void Spread(FVector2D XY, FVector2D Across, FVector2D Reach, const Earthwork::Load& Load);
     void PressTrack(FVector2D Center, FVector2D Forward, double HalfLength, double HalfWidth,
         double Outward, double Scrub, bool bTracked, double LoadFactor = 1);
+    double CompactBody(FVector2D Center,FVector2D Across,FVector2D Reach,double Plane,FVector2D Slopes,
+        double PressureKPa,double Dt);
     void ShowSpill(FVector Origin, double Volume, Earthwork::Material Type,
         FVector Direction = FVector::ZeroVector, double FloorZ = -BIG_NUMBER, double ThrowScale = 1.0);
     void UpdateSpills(double Dt);
-    double Grade(FVector2D XY, FVector2D Across, FVector2D Reach, double Rate, double ToolHeight, FVector2D Slopes);
+    double Grade(FVector2D XY, FVector2D Across, FVector2D Reach, double Rate, double ToolHeight, FVector2D Slopes,
+        const TArray<FVector>* CuttingEdge = nullptr);
     void UpdateTiles(FVector2D Focus);
     bool HitsTree(FVector2D XY, double Radius, bool bClear);
     void PushTrees(FVector2D XY, double Radius, FVector2D Direction, double ForceN, double ContactHeight, double Dt);
