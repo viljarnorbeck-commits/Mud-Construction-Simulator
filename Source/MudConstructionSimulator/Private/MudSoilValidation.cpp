@@ -1,4 +1,5 @@
 #include "SoilValidation.h"
+#include "LoaderRig.h"
 #include "MudTerrain.h"
 #include "MudMachine.h"
 #include "HAL/PlatformTime.h"
@@ -86,7 +87,7 @@ bool RunSoilValidation(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
         auto* Loader = Fleet[4];
         Dozer->Position = FVector2D(145,740); Dozer->UpdatePose(Terrain);
         Loader->Position = Pile - FVector2D(6,0);
-        Loader->Boom = -22; Loader->Curl = 0;
+        Loader->Boom = LoaderRig::MinBoom; Loader->Curl = 0;
         Loader->UpdatePose(Terrain);
         const FVector Lip = Loader->ToolPoint();
         Loader->Position += Pile - FVector2D(Lip.X, Lip.Y) - FVector2D(1.6, 0);

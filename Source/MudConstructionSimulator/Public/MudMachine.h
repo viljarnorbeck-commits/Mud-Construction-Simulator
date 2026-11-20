@@ -52,7 +52,11 @@ public:
     void RestoreArticulation(double Angle);
     void UpdatePose(const AMudTerrain& Terrain);
     FVector ToolPoint() const;
+    // Swept collision of an airborne material packet against the moving bed.
+    bool InterceptMaterial(FVector From, FVector& To, FVector& Velocity, Earthwork::Load& Material, bool bReceive = true);
+    FVector BedLoadPoint() const;
     FTransform CabView() const;
+    USceneComponent* GetDriverSeat() const { return DriverSeat; }
     bool BlocksPedestrian(FVector2D Point, double Height, double Radius) const;
     void UpdateCabInstruments();
     FString ToolDescription() const;
@@ -198,6 +202,7 @@ private:
     UPROPERTY() TObjectPtr<UBoxComponent> EnvironmentCollider;
     UPROPERTY() TObjectPtr<UProceduralMeshComponent> Payload;
     UPROPERTY() TObjectPtr<USceneComponent> CabEye;
+    USceneComponent* DriverSeat = nullptr;
     UPROPERTY() TObjectPtr<USceneComponent> CabWheel;
     UPROPERTY() TObjectPtr<USceneComponent> CabLeverA;
     UPROPERTY() TObjectPtr<USceneComponent> CabLeverB;

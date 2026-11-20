@@ -1,4 +1,5 @@
 #include "MudTerrain.h"
+#include "MudMachine.h"
 
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
@@ -671,14 +672,42 @@ void AMudTerrain::LandPour(FVector2D Contact, FPour& Pour)
     Deposit(Contact, Pour.Radius * 0.87, Pour.Mass);
 }
 
+void AMudTerrain::RegisterMaterialReceiver(AMudMachine& Machine)
+{
+    MaterialReceivers.RemoveAll([](const TWeakObjectPtr<AMudMachine>& Value) { return !Value.IsValid(); });
+    MaterialReceivers.AddUnique(&Machine);
+}
+
 void AMudTerrain::AdvancePours(double Dt)
 {
+    // Swept collision is stable even when a long render frame would tunnel through a bed.
+    if (Dt > 1.0 / 60.0 + 0.000001)
+    {
+        const int32 Steps = FMath::CeilToInt(Dt * 60);
+        for (int32 Step = 0; Step < Steps; ++Step) AdvancePours(Dt / Steps);
+        return;
+    }
     const FVector Gravity(0, 0, -9.81);
     for (int32 Index = Pours.Num() - 1; Index >= 0; --Index)
     {
         auto& Portion = Pours[Index];
         const FVector Previous = Portion.Position;
-        const FVector Next = Previous + Portion.Velocity * Dt + Gravity * (0.5 * Dt * Dt);
+        FVector Next = Previous + Portion.Velocity * Dt + Gravity * (0.5 * Dt * Dt);
+        Portion.Velocity += Gravity * Dt;
+        bool bBedImpact = false;
+        for (const auto& Receiver : MaterialReceivers)
+            if (Receiver.IsValid() && Receiver->InterceptMaterial(Previous, Next, Portion.Velocity, Portion.Mass))
+            { bBedImpact = true; break; }
+        if (Portion.Mass.Volume() <= Epsilon)
+        {
+            Pours.RemoveAtSwap(Index, 1, EAllowShrinking::No);
+            continue;
+        }
+        if (bBedImpact)
+        {
+            Portion.Position = Next;
+            continue;
+        }
         const FVector2D From(Previous.X, Previous.Y), To(Next.X, Next.Y);
         const double StartGap = Previous.Z - Height(From);
         const double EndGap = Next.Z - Height(To);
@@ -691,7 +720,6 @@ void AMudTerrain::AdvancePours(double Dt)
         else
         {
             Portion.Position = Next;
-            Portion.Velocity += Gravity * Dt;
         }
     }
 }
@@ -916,7 +944,17 @@ void AMudTerrain::UpdateSpills(double Dt)
                 Clump.Velocity *= FMath::Exp(-Dt * (bSoil ? 15.0 : 5.9));
             else
                 Clump.Velocity.Z -= 9.81 * Dt;
+            const FVector Previous = Clump.Position;
             Clump.Position += Clump.Velocity * Dt;
+            for (const auto& Receiver : MaterialReceivers)
+            {
+                Load NoMass;
+                if (Receiver.IsValid() && Receiver->InterceptMaterial(Previous, Clump.Position, Clump.Velocity, NoMass, false))
+                {
+                    Clump.Life = FMath::Min(Clump.Life, 0.16);
+                    break;
+                }
+            }
             const double Ground = FMath::Max(Height(FVector2D(Clump.Position.X, Clump.Position.Y)), Clump.FloorZ);
             if (Clump.bRolling || Clump.Position.Z <= Ground + Clump.Radius * 0.30)
             {

@@ -13,6 +13,7 @@ class UTexture2D;
 class UMaterialInterface;
 class UStaticMeshComponent;
 class FJsonObject;
+class AMudMachine;
 
 struct FMudPile
 {
@@ -78,6 +79,7 @@ public:
     void Deposit(FVector2D XY, double Radius, const Earthwork::Load& Load);
     void Pour(FVector Origin, FVector Direction, double Radius, const Earthwork::Load& Load);
     void AdvancePours(double Dt);
+    void RegisterMaterialReceiver(AMudMachine& Machine);
     void AdvanceSoil(double Dt);
     int32 ActiveSoilCells() const { return static_cast<int32>(SoilFlow.ActiveCells()); }
     double SoilStepMilliseconds = 0;
@@ -205,6 +207,7 @@ private:
     TArray<int32> TileSteps;
     FSpillBatch Spills[Earthwork::MaterialCount];
     TArray<FPour> Pours;
+    TArray<TWeakObjectPtr<AMudMachine>> MaterialReceivers;
     FRandomStream SpillRandom{66};
     FVector2D RubbleFocus{-10000, -10000};
     double NextRubbleUpdate = 0;
