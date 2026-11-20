@@ -582,13 +582,25 @@ TArray<TPair<int32, double>> AMudTerrain::ToolFootprint(FVector2D XY, FVector2D 
 {
     TArray<TPair<int32, double>> Result;
     const FVector2D Along(Across.Y, -Across.X);
-    const double Radius = bBladePass ? Reach.Size() : FMath::Max(Reach.X, Reach.Y);
+    const double Radius = bBladePass ? Reach.Size()+.71 : FMath::Max(Reach.X, Reach.Y);
     for (int32 Cell : Cells(XY, Radius))
     {
         const FVector2D Offset = FVector2D(Cell % Samples, Cell / Samples) - XY;
         const double U = FMath::Square(FVector2D::DotProduct(Offset, Across) / Reach.X);
         const double V = FMath::Square(FVector2D::DotProduct(Offset, Along) / Reach.Y);
-        const double Weight = bBladePass ? FMath::Max(0.0, 1.0 - U) * FMath::Max(0.0, 1.0 - V) : 1.0 - U - V;
+        double Weight=1.0-U-V;
+        if(bBladePass)
+        {
+            Weight=0;
+            // Coverage of the cell, not just its centre: contact with the reconstructed
+            // surface can begin before the tool/chassis reaches the control node.
+            for(int Y=0;Y<4;++Y)for(int X=0;X<4;++X)
+            {
+                const FVector2D D=Offset+FVector2D((X+.5)*.25-.5,(Y+.5)*.25-.5);
+                const double A=FVector2D::DotProduct(D,Across)/Reach.X,B=FVector2D::DotProduct(D,Along)/Reach.Y;
+                Weight+=FMath::Max(0.,1-A*A)*FMath::Max(0.,1-B*B)/16;
+            }
+        }
         if (Weight > Epsilon)
             Result.Emplace(Cell, Weight);
     }
@@ -853,6 +865,38 @@ void AMudTerrain::ApplyFill(const TArray<TPair<int32, double>>& Area, const Eart
     }
 }
 
+double AMudTerrain::CompactBody(FVector2D Center,FVector2D Across,FVector2D Reach,double Plane,FVector2D Slopes,
+    double PressureKPa,double Dt)
+{
+    if(Dt<=0||PressureKPa<=0)return 0;
+    const auto Area=ToolFootprint(Center,Across,Reach,true);
+    const FVector2D Forward(Across.Y,-Across.X);
+    double Supported=0,ContactWeight=0;
+    TArray<TPair<int32,double>> Contacts;
+    for(const auto& Sample:Area)
+    {
+        const int Cell=Sample.Key;const FVector2D XY(Cell%Samples,Cell/Samples),D=XY-Center;
+        const double Bottom=Plane+FVector2D::DotProduct(D,Across)*Slopes.X+FVector2D::DotProduct(D,Forward)*Slopes.Y;
+        const double Depth=Heights[Cell]-Bottom;
+        if(Depth<=.001||IsAggregate(Surface(XY)))continue;
+        Supported+=Sample.Value*FMath::Clamp(Depth/.15,0.,.65);
+        ContactWeight+=Sample.Value;Contacts.Add(Sample);
+    }
+    const double LoadShare=ContactWeight>Epsilon?Supported/ContactWeight:0;
+    const double SupportedKN=PressureKPa*(4*Reach.X*Reach.Y)*LoadShare;
+    for(const auto& Contact:Contacts)
+    {
+        const int Cell=Contact.Key;const FVector2D XY(Cell%Samples,Cell/Samples);
+        // Packing reduces occupied height, never material mass. The existing column
+        // packing limit prevents a chassis from tunnelling through a large soil bank.
+        // Concentrate the supported load on the actual contact patch, rather than
+        // diluting it over the empty underside when a narrow crest touches one edge.
+        const double Packed=Edit(Cell).Compact(FMath::Clamp(SupportedKN/80.*Contact.Value/ContactWeight,0.,2.)*Dt*4,Wetness(XY));
+        if(Packed>Epsilon)UpdateCell(Cell);
+    }
+    return LoadShare;
+}
+
 void AMudTerrain::PressTrack(FVector2D Center, FVector2D Forward, double HalfLength, double HalfWidth,
     double Outward, double Scrub, bool bTracked, double LoadFactor)
 {
@@ -867,14 +911,8 @@ void AMudTerrain::PressTrack(FVector2D Center, FVector2D Forward, double HalfLen
     {
         const FVector2D Point(Cell % Samples, Cell / Samples);
         double Contact = 0;
-        if (bTracked)
-        {
-            const FVector2D Offset = Point - Center;
-            const double Along = FMath::Abs(FVector2D::DotProduct(Offset, Forward)) / HalfLength;
-            const double Across = FMath::Abs(FVector2D::DotProduct(Offset, Right)) / EdgeWidth;
-            Contact = FMath::Max(0.0, 1.0 - Along * Along) * FMath::Max(0.0, 1.0 - Across * Across);
-        }
-        else
+        // Integrate both track and tyre patches over the physical cell. Narrow
+        // track shoes must not disappear between metre-spaced sample centres.
         {
             // Integrate the tyre patch within a terrain cell so narrow tyres leave continuous marks.
             for (int32 Y = 0; Y < 4; ++Y)
@@ -883,7 +921,8 @@ void AMudTerrain::PressTrack(FVector2D Center, FVector2D Forward, double HalfLen
                     const FVector2D Offset = Point + FVector2D((X + 0.5) * 0.25 - 0.5, (Y + 0.5) * 0.25 - 0.5) - Center;
                     const double Along = FVector2D::DotProduct(Offset, Forward) / HalfLength;
                     const double Across = FMath::Abs(FVector2D::DotProduct(Offset, Right)) / EdgeWidth;
-                    Contact += FMath::Max(0.0, 1.0 - Along * Along) * (1.0 - FMath::SmoothStep(0.35, 1.0, Across)) / 16.0;
+                    Contact += FMath::Max(0.0, 1.0 - Along * Along) *
+                        (bTracked?FMath::Max(0.,1-Across*Across):1.0-FMath::SmoothStep(0.35,1.0,Across))/16.0;
                 }
         }
         if (Contact <= Epsilon)
@@ -1019,9 +1058,23 @@ void AMudTerrain::UpdateSpills(double Dt)
     }
 }
 
-double AMudTerrain::Grade(FVector2D XY, FVector2D Across, FVector2D Reach, double Rate, double ToolHeight, FVector2D Slopes)
+double AMudTerrain::Grade(FVector2D XY, FVector2D Across, FVector2D Reach, double Rate, double ToolHeight, FVector2D Slopes,
+    const TArray<FVector>* CuttingEdge)
 {
-    const auto Area = ToolFootprint(XY, Across, Reach, true);
+    auto Area = ToolFootprint(XY, Across, Reach, true);
+    if(CuttingEdge&&CuttingEdge->Num()>1)
+    {
+        TMap<int32,double> Weights;
+        const FVector2D Forward(Across.Y,-Across.X);
+        for(int I=1;I<CuttingEdge->Num();++I)
+        {
+            const FVector2D A((*CuttingEdge)[I-1].X,(*CuttingEdge)[I-1].Y),B((*CuttingEdge)[I].X,(*CuttingEdge)[I].Y);
+            const auto Strip=ToolFootprint((A+B)*.5-Forward*.4,Across,{FVector2D::Distance(A,B)*.5+.025,Reach.Y},true);
+            for(const auto& Cell:Strip)Weights.FindOrAdd(Cell.Key)=FMath::Min(1.,Weights.FindRef(Cell.Key)+Cell.Value);
+        }
+        Area.Reset();for(const auto& Cell:Weights)Area.Add({Cell.Key,Cell.Value});
+        Area.Sort([](const auto& A,const auto& B){return A.Key<B.Key;});
+    }
     if (Area.Num() < 2)
         return 0;
     const FVector2D Along(Across.Y, -Across.X);
@@ -1064,7 +1117,9 @@ double AMudTerrain::Grade(FVector2D XY, FVector2D Across, FVector2D Reach, doubl
     Load Moved;
     for (const auto& Entry : HighCells)
     {
-        const Load Cut = Edit(Entry.Key).Cut(Entry.Value * Fraction);
+        const FVector2D Point(Entry.Key%Samples,Entry.Key/Samples);
+        const double Plane=ToolHeight+FVector2D::DotProduct(Point-XY,Gradient);
+        const Load Cut = Edit(Entry.Key).CutToHeight(FMath::Max(Plane,Heights[Entry.Key]-Entry.Value*Fraction),BIG_NUMBER);
         Moved.Receive(Cut);
         if (Cut.Volume() > 0)
             UpdateCell(Entry.Key, -Cut.Volume());

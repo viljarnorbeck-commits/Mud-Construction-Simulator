@@ -87,18 +87,34 @@ bool RunSoilValidation(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
         auto* Loader = Fleet[4];
         Dozer->Position = FVector2D(145,740); Dozer->UpdatePose(Terrain);
         Loader->Position = Pile - FVector2D(6,0);
-        Loader->Boom = LoaderRig::MinBoom; Loader->Curl = 0;
+        // Put the teeth into the sloped toe rather than riding above it as the tyres climb.
+        Loader->Boom = LoaderRig::MinBoom; Loader->Curl = -12;
         Loader->UpdatePose(Terrain);
         const FVector Lip = Loader->ToolPoint();
-        Loader->Position += Pile - FVector2D(Lip.X, Lip.Y) - FVector2D(1.6, 0);
+        Loader->Position += Pile - FVector2D(Lip.X, Lip.Y) - FVector2D(2.8, 0);
         Loader->UpdatePose(Terrain);
+        // Approach the face with a shallow bite. The previous dozer pass can leave
+        // the wheel path below the pile; minimum boom height would bury the teeth.
+        for(int I=0;I<240;++I)
+        {
+            const FVector P=Loader->ToolPoint();
+            if(Terrain.Height({P.X,P.Y})-P.Z<.18)break;
+            Loader->Work(1./60,.65,0,Terrain,Fleet);
+        }
+        const FVector2D IntakeStart=Loader->Position;
         for (int32 I = 0; I < 300 && Loader->Cargo.Volume() < 0.5; ++I)
         {
             Loader->Drive(1.0 / 60, 0.5, 0, false, Terrain, Fleet);
-            Loader->Work(1.0 / 60, 0, 0, Terrain, Fleet);
+            const FVector P=Loader->ToolPoint();
+            const double Lift=Terrain.Height({P.X,P.Y})-P.Z>.35?.2:0.;
+            Loader->Work(1.0 / 60, Lift, 0, Terrain, Fleet);
             Terrain.AdvanceSoil(1.0 / 60);
         }
         const double Scooped = Loader->Cargo.Volume();
+        const FVector IntakeLip=Loader->ToolPoint();
+        UE_LOG(LogTemp,Display,TEXT("Soil intake %.0f: pile %s, start %s, end %s, lip %.3f vs ground %.3f, boom %.1f curl %.1f speed %.2f roll %d, %s"),
+            Angle,*Pile.ToString(),*IntakeStart.ToString(),*Loader->Position.ToString(),IntakeLip.Z,
+            Terrain.Height({IntakeLip.X,IntakeLip.Y}),Loader->Boom,Loader->Curl,Loader->Speed,Loader->RolledSide,*Loader->ToolDescription());
         Loader->Halt();
         for (int32 I = 0; I < 150; ++I)
         {
@@ -106,9 +122,10 @@ bool RunSoilValidation(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
             Terrain.AdvanceSoil(1.0 / 60);
         }
         const FVector2D From = Loader->Position;
-        for (int32 I = 0; I < 180; ++I)
+        // Back out from the intake pile before tipping at a clear drop point.
+        for (int32 I = 0; I < 240; ++I)
         {
-            Loader->Drive(1.0 / 60, 0.5, 0, false, Terrain, Fleet);
+            Loader->Drive(1.0 / 60, -0.6, 0, false, Terrain, Fleet);
             Loader->Work(1.0 / 60, 0, 0, Terrain, Fleet);
             Terrain.AdvanceSoil(1.0 / 60);
         }

@@ -11,6 +11,7 @@
 #include "Misc/Parse.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonReader.h"
+#include "Components/BoxComponent.h"
 
 AMudWorldValidation::AMudWorldValidation(){PrimaryActorTick.bCanEverTick=true;}
 void AMudWorldValidation::Initialize(AMudTerrain* Ground)
@@ -76,7 +77,130 @@ void AMudWorldValidation::Tick(float Dt)
         Fallen,Resisted,Undercut,Blocks,Restored,Collision);
     const bool Mobility=TestMobility();
     const bool Earthwork=TestGeneratedEarthwork();
-    Finish(Fallen&&Resisted&&Undercut&&Blocks&&Restored&&Collision&&Mobility&&Earthwork);
+    const bool Dozer=TestDozerMechanics();
+    Finish(Fallen&&Resisted&&Undercut&&Blocks&&Restored&&Collision&&Mobility&&Earthwork&&Dozer);
+}
+
+bool AMudWorldValidation::TestDozerMechanics()
+{
+    TArray<AMudMachine*> Fleet;AMudMachine* D=nullptr;
+    for(TActorIterator<AMudMachine> It(GetWorld());It;++It){Fleet.Add(*It);if(It->Kind==EMudMachine::Dozer)D=*It;}
+    if(!D)return false;
+    const auto Saved=Terrain->SaveTerrain();const auto Pits=Terrain->Pits;
+    const FVector2D Origin(Terrain->Start.X-18,Terrain->Start.Y-18);
+    const double Z=Terrain->Start.Z;
+    const auto Prepare=[&](Earthwork::Material Type=Earthwork::Material::Soil)
+    {
+        if(!Terrain->RestoreTerrain(Saved))return false;Terrain->Pits=Pits;
+        for(int X=-10;X<=52;++X)for(int Y=-9;Y<=9;++Y)
+        {
+            const FVector2D P=Origin+FVector2D(X,Y);Terrain->Excavate(P,.49,1000,Z-.8);
+            Earthwork::Load Fill;Fill.Add(Type,FMath::Max(0.,Z-Terrain->Height(P)));Terrain->Deposit(P,.49,Fill);
+        }
+        for(int I=0;I<Fleet.Num();++I){auto* M=Fleet[I];M->StopWork();M->Cargo={};M->RolledSide=0;
+            M->Position=Origin+FVector2D(-65,I*9);M->UpdatePose(*Terrain);}
+        D->Position=Origin;D->Heading=0;D->Blade=0;D->BladeYaw=D->BucketTilt=0;D->UpdatePose(*Terrain);
+        return true;
+    };
+    const auto Mass=[&](){double M=Terrain->MaterialBalance();for(auto* Machine:Fleet)M+=Machine->Cargo.Mass();return M;};
+    if(!Prepare())return false;
+    bool Geometry=true,Pins=true,Edges=true,Strokes=true,Ends=true;
+    double MinLink=1e30,MaxLink=0;
+    for(double Lift:{DozerRig::MinLift,.4,DozerRig::MaxLift})for(double Yaw:{-25.,0.,25.})for(double Tilt:{-8.,0.,8.})
+    {
+        D->Blade=Lift-D->BladeLift;D->BladeYaw=Yaw;D->BucketTilt=Tilt;D->UpdatePose(*Terrain);
+        const FVector A=D->Tool->GetComponentTransform().TransformPosition(D->DozerBladePin);
+        const FVector B=D->DozerPushArms->GetComponentTransform().TransformPosition({D->DozerPushLength,0,0});
+        Pins&=FVector::Distance(A,B)<.001;
+        Pins&=FVector::Distance(A,D->DozerYawCarrier->GetComponentLocation())<.001;
+        for(double Side:{-172.,0.,172.})
+        {
+            const auto Edge=DozerRig::Edge(Side),O=DozerRig::Origin(Lift,Yaw,Tilt),R=DozerRig::Rotate(Edge,Yaw,Tilt);
+            const FVector Expected=D->GetActorTransform().TransformPosition({O.X+R.X,O.Y+R.Y,O.Z+R.Z});
+            Edges&=FVector::Distance(Expected,D->Tool->GetComponentTransform().TransformPosition({Edge.X,Edge.Y,Edge.Z}))<.001;
+        }
+        for(const auto& Link:D->Hydraulics)
+        {
+            const FVector Base=Link.Base->GetComponentTransform().TransformPosition(Link.BasePin);
+            const FVector End=Link.End->GetComponentTransform().TransformPosition(Link.RodPin);
+            const double Length=FVector::Distance(Base,End);MinLink=FMath::Min(MinLink,Length);MaxLink=FMath::Max(MaxLink,Length);
+            const bool Stroke=Length>Link.LengthCm+1&&Length<Link.LengthCm*2.05;
+            if(!Stroke)UE_LOG(LogTemp,Display,TEXT("Dozer stroke mismatch: lift %.2f yaw %.0f tilt %.0f span %.2f barrel %.1f base %s end %s"),
+                Lift,Yaw,Tilt,Length,Link.LengthCm,*Link.BasePin.ToString(),*Link.RodPin.ToString());
+            Strokes&=Stroke;
+            const FVector RodEnd=Link.Rod->GetComponentTransform().TransformPosition({0,0,50});
+            Ends&=FVector::Distance(RodEnd,End)<.02;
+        }
+    }
+    Geometry=Pins&&Edges&&Strokes&&Ends;
+    UE_LOG(LogTemp,Display,TEXT("Dozer geometry: pins %d edges %d strokes %d rod ends %d"),Pins,Edges,Strokes,Ends);
+    if(!Prepare())return false;
+    for(double X:{12.,23.})for(double Side:{-1.,1.})
+    {Earthwork::Load Heap;Heap.Add(Earthwork::Material::Soil,2);Terrain->Deposit(Origin+FVector2D(X,Side*1.1),1.1,Heap);}
+    Earthwork::Load Narrow;Narrow.Add(Earthwork::Material::Soil,.65);
+    Terrain->Deposit(Origin+FVector2D(17,0),.8,Narrow);
+    const double MoundMass=Mass();
+    D->Blade=DozerRig::MaxLift-D->BladeLift;D->UpdatePose(*Terrain);
+    for(int I=0;I<1200&&D->Position.X<Origin.X+30;++I)
+    {D->Drive(1./60,1,0,false,*Terrain,Fleet);D->Work(1./60,0,0,*Terrain,Fleet);}
+    const double Mounds=D->Position.X-Origin.X;const bool Upright=D->RolledSide==0;
+    const bool MoundMassKept=FMath::Abs(Mass()-MoundMass)<.00001;
+    if(!Prepare())return false;
+    Earthwork::Load Heap;Heap.Add(Earthwork::Material::Soil,3);Terrain->Deposit(Origin+FVector2D(10,0),2.3,Heap);
+    const double PileBefore=Terrain->Height(Origin+FVector2D(10,0));
+    D->Blade=-.55;D->UpdatePose(*Terrain);D->Work(1./60,0,0,*Terrain,Fleet);
+    const double Before=Mass();double Moved=0,PeakDraft=0;
+    for(int I=0;I<900&&D->Position.X<Origin.X+22;++I)
+    {
+        D->Drive(1./60,1,0,false,*Terrain,Fleet);D->Work(1./60,0,0,*Terrain,Fleet);
+        Moved+=D->LastWorkVolume;PeakDraft=FMath::Max(PeakDraft,D->DraftForceKN);
+    }
+    const double Push=D->Position.X-Origin.X,PushError=Mass()-Before;
+    const double PileDrop=PileBefore-Terrain->Height(Origin+FVector2D(10,0));
+    const bool PileCut=PileDrop>.05;
+    UE_LOG(LogTemp,Display,TEXT("Dozer pile centre cut: %.4f m"),PileDrop);
+    if(!Prepare())return false;
+    Earthwork::Load Huge;Huge.Add(Earthwork::Material::Soil,100);Terrain->Deposit(Origin+FVector2D(4,0),4,Huge);
+    D->Blade=-.55;D->UpdatePose(*Terrain);D->Work(1./60,0,0,*Terrain,Fleet);
+    for(int I=0;I<300;++I)D->Drive(1./60,1,0,false,*Terrain,Fleet);
+    const double Heavy=D->Position.X-Origin.X,Spin=FMath::Abs(D->Drivetrain.WheelSpeed-D->Speed);
+    const double HeavySpeed=D->Speed;
+    const auto SideFlow=[&](double Yaw)
+    {
+        if(!Prepare())return 0.;D->Blade=-.55;D->BladeYaw=Yaw;D->Cargo.Add(Earthwork::Material::Soil,3);
+        D->UpdatePose(*Terrain);D->Work(1./60,0,0,*Terrain,Fleet);const auto BeforeCells=Terrain->AccountedMass;
+        const double InitialMass=Mass();
+        for(int I=0;I<240;++I){D->Drive(1./60,.7,0,false,*Terrain,Fleet);D->Work(1./60,0,0,*Terrain,Fleet);}
+        double Total=0,Moment=0;
+        for(const auto& Entry:Terrain->AccountedMass)
+        {
+            const double Added=FMath::Max(0.,Entry.Value-BeforeCells.FindRef(Entry.Key));
+            Total+=Added;Moment+=Added*(Entry.Key/Terrain->Samples-Origin.Y);
+        }
+        if(FMath::Abs(Mass()-InitialMass)>.00001)return 0.;
+        return Total>.01?Moment/Total:0.;
+    };
+    const double Left=SideFlow(-25),Right=SideFlow(25);
+    if(!Prepare())return false;D->bGrade=false;D->ToggleTool();
+    for(int I=0;I<90;++I)D->Work(1./60,0,0,*Terrain,Fleet);
+    for(int I=0;I<1200&&D->Position.X<Origin.X+18;++I)
+    {D->Drive(1./60,.7,0,false,*Terrain,Fleet);D->Work(1./60,0,0,*Terrain,Fleet);}
+    const double HeldDepth=Z-Terrain->Height(Origin+FVector2D(8,0));
+    const bool GradeHold=D->Position.X>Origin.X+8&&HeldDepth>.10&&HeldDepth<.45;
+    UE_LOG(LogTemp,Display,TEXT("Dozer grade hold: travel %.2f m, centre cut %.3f m, stable %d"),D->Position.X-Origin.X,HeldDepth,GradeHold);
+    // Existing native surface validation compares updated triangles/normals and also
+    // performs a fractional-cell deformation/restore; verify actual Chaos height too.
+    Terrain->UpdateTiles(Origin);for(int I=0;I<12;++I)Terrain->UpdateTiles(Origin);
+    const FVector2D Probe=Origin+FVector2D(8,0);const double H=Terrain->Height(Probe)*100;
+    FHitResult Hit;FCollisionQueryParams Query(SCENE_QUERY_STAT(DozerDeformedSurface),true);
+    const bool Collision=GetWorld()->LineTraceSingleByChannel(Hit,{Probe.X*100,Probe.Y*100,H+300},
+        {Probe.X*100,Probe.Y*100,H-300},ECC_Visibility,Query)&&FMath::Abs(Hit.ImpactPoint.Z-H)<1;
+    Terrain->Pits=Pits;const bool Restored=Terrain->RestoreTerrain(Saved);
+    UE_LOG(LogTemp,Display,TEXT("Dozer A-H: geometry %d (cylinder %.1f..%.1f cm), mounds %.2f m upright %d, push %.2f m moved %.2f m3 draft %.1f kN mass %.9f t, overload %.2f m slip %.2f m/s, side %.2f/%.2f m, collision %d restore %d"),
+        Geometry,MinLink,MaxLink,Mounds,Upright,Push,Moved,PeakDraft,PushError,Heavy,Spin,Left,Right,Collision,Restored);
+    return Geometry&&Mounds>26&&Upright&&MoundMassKept&&Push>6&&Moved>.3&&PileCut&&FMath::Abs(PushError)<.00001&&Heavy<1&&
+        (Spin>1||FMath::Abs(HeavySpeed)<.05)&&
+        Left<-.2&&Right>.2&&GradeHold&&Collision&&Restored;
 }
 
 bool AMudWorldValidation::TestGeneratedEarthwork()

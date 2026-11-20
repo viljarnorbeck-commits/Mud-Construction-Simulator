@@ -35,14 +35,18 @@ void AMudMaterialReview::Initialize(AMudTerrain& Ground,const TArray<AMudMachine
 {
     Terrain=&Ground; Fleet=Machines;
     FParse::Value(FCommandLine::Get(),TEXT("MudMaterialReview="),Folder);
+    bDozerReview=FParse::Param(FCommandLine::Get(),TEXT("MudDozerReview"));
     IFileManager::Get().MakeDirectory(*Folder,true);
     Center=FVector2D(Terrain->Start.X+18,Terrain->Start.Y+18);
     for (int32 M=0; M<Earthwork::MaterialCount; ++M)
     {
         const FVector2D P=Center+FVector2D(0,(M-2)*6.0);
         Earthwork::Load Mass; Mass.Add(static_cast<Earthwork::Material>(M),14);
-        Terrain->Deposit(P,2.7,Mass);
-        Terrain->CutPass(P+FVector2D(0.8,0),FVector2D(0,1),FVector2D(1.8,0.45),1.2,Terrain->Height(Center)+0.45);
+        if(!bDozerReview)
+        {
+            Terrain->Deposit(P,2.7,Mass);
+            Terrain->CutPass(P+FVector2D(0.8,0),FVector2D(0,1),FVector2D(1.8,0.45),1.2,Terrain->Height(Center)+0.45);
+        }
         Fleet[M]->Position=Center+FVector2D(-25,25+M*8); Fleet[M]->UpdatePose(*Terrain);
     }
     auto* Loader=Fleet[4]; Loader->Position=Center+FVector2D(-6,-8); Loader->Heading=0;
@@ -56,6 +60,12 @@ void AMudMaterialReview::Initialize(AMudTerrain& Ground,const TArray<AMudMachine
         if (auto* Value=IConsoleManager::Get().FindConsoleVariable(Setting))
             Value->Set(FCString::Strcmp(Setting,TEXT("r.ScreenPercentage"))==0 ? 100 : 0,ECVF_SetByCode);
     View(FVector(10,-8,5.6),FVector(0,-7,0.6));
+    if(bDozerReview)
+    {
+        Dozer->StopWork();Dozer->Position=Center;Dozer->Heading=0;
+        Dozer->Blade=.25;Dozer->BladeYaw=-25;Dozer->BucketTilt=-8;Dozer->UpdatePose(*Terrain);
+        View({6,-5,3.2},{2.5,0,1.});
+    }
 }
 void AMudMaterialReview::Tick(float Dt)
 {
@@ -65,10 +75,18 @@ void AMudMaterialReview::Tick(float Dt)
     if (Frame>=180 && Frame<300) Timings.Add(Dt*1000.0);
     if (Frame>=450 && Frame<535) WorkTimings.Add(Dt*1000.0);
     if (Frame==300) FScreenshotRequest::RequestScreenshot(Folder/TEXT("near.png"),false,false);
-    if (Frame==305) View(FVector(24,-27,19),FVector(0,0,0.7));
+    if (Frame==305)
+    {
+        if(bDozerReview){Fleet[0]->BladeYaw=25;Fleet[0]->BucketTilt=8;Fleet[0]->UpdatePose(*Terrain);View({0,-5,3.1},{2.5,0,1.});}
+        else View(FVector(24,-27,19),FVector(0,0,0.7));
+    }
     if (Frame==365) FScreenshotRequest::RequestScreenshot(Folder/TEXT("overview.png"),false,false);
-    if (Frame==370) View(FVector(7,-23,5),FVector(-1,-11,1));
-    if (Frame>370 && Frame<550)
+    if (Frame==370)
+    {
+        if(bDozerReview){Fleet[0]->Blade=-.55;Fleet[0]->BladeYaw=0;Fleet[0]->BucketTilt=0;Fleet[0]->UpdatePose(*Terrain);View({5,-5,2.6},{2.5,0,.8});}
+        else View(FVector(7,-23,5),FVector(-1,-11,1));
+    }
+    if (!bDozerReview && Frame>370 && Frame<550)
     {
         Fleet[0]->Drive(1.0/60,0.30,0,false,*Terrain,Fleet);
         Fleet[0]->Work(1.0/60,0,0,*Terrain,Fleet);
