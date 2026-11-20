@@ -64,27 +64,66 @@ def meadow_tuft():
 
 
 def spoil_clump():
-    vertices = [(0, 1, -18), (8, -11, 35)]
-    faces = []
-    outline = ((42, 0, -3), (26, 35, 5), (-16, 46, -6), (-47, 15, 1),
-               (-39, -27, -8), (4, -46, 0), (39, -23, 8))
-    vertices.extend(outline)
-    for x, y, z in outline:
-        vertices.append((x * 0.72 - 4, y * 0.66 + 2, z + 19))
-    for index in range(len(outline)):
-        a, b = 2 + index, 2 + (index + 1) % len(outline)
-        c, d = a + len(outline), b + len(outline)
-        faces.extend(((b, a, 0), (a, b, d), (a, d, c), (c, d, 1)))
-    return vertices, faces
+    # Rounded, low-contrast crumbs for soft earth; aggregate keeps its angular mesh.
+    vertices, faces, uvs = [], [], []
+    sides, rings = 14, 8
+    for j in range(rings + 1):
+        v = j / rings
+        angle = math.pi * v
+        for i in range(sides + 1):
+            u = i / sides
+            theta = math.tau * u
+            radius = 46 * math.sin(angle) * (1 + .045 * math.sin(theta * 3 + angle))
+            vertices.append((radius * math.cos(theta), radius * math.sin(theta), 35 * math.cos(angle)))
+            uvs.append((u,v))
+            if i and j:
+                n = j * (sides + 1) + i
+                faces.extend(((n-sides-2,n-1,n-sides-1),(n-sides-1,n-1,n)))
+    return vertices, faces, uvs
 
 
-def import_mesh(asset_tools, directory, name, mesh):
-    vertices, faces = mesh
+def quarry_fragment():
+    bottom = [(-43, -28, -9), (16, -39, -14), (44, -12, -8),
+              (36, 26, -11), (-12, 40, -14), (-46, 16, -6)]
+    crown = [(-29, -23, 20), (11, -27, 28), (32, -9, 17),
+             (20, 19, 23), (-11, 27, 35), (-32, 13, 17)]
+    ring = len(bottom)
+    faces = [(0, i + 1, i) for i in range(1, ring - 1)]
+    faces += [(ring, ring + i, ring + i + 1) for i in range(1, ring - 1)]
+    for i in range(ring):
+        j = (i + 1) % ring
+        faces.extend(((i, j, j + ring), (i, j + ring, i + ring)))
+    return bottom + crown, faces
+
+
+def cargo_surface():
+    vertices, faces, uvs = [], [], []
+    columns, rows = 49, 33
+    for row in range(rows):
+        for column in range(columns):
+            u, v = column / (columns - 1), row / (rows - 1)
+            x, y = u - 0.5, v - 0.5
+            profile = max(0.0, 1.0 - abs(x * 2) ** 2.8 - abs(y * 2) ** 2.2)
+            shape = 0.70 + 0.025 * math.sin(x * 11 + y * 9) + 0.012 * math.sin(x * 21 - y * 15)
+            vertices.append((x * 100, y * 100, 100 * profile ** 0.87 * shape))
+            uvs.append((u, v))
+            if row and column:
+                index = row * columns + column
+                faces.extend(((index - columns - 1, index - columns, index - 1),
+                              (index - columns, index, index - 1)))
+    return vertices, faces, uvs
+
+
+def import_mesh(asset_tools, directory, name, mesh, smooth=False):
+    vertices, faces, *uvs = mesh
     # Unreal's OBJ translator flips Y. Keep every mesh pivot at ground level.
     lines = [f"o {name}"]
     lines.extend(f"v {x:.4f} {-y:.4f} {z:.4f}" for x, y, z in vertices)
     max_height = max(z for _, _, z in vertices)
-    lines.extend(f"vt {(x + 240) / 480:.4f} {z / max_height:.4f}" for x, _, z in vertices)
+    coordinates = uvs[0] if uvs else [((x + 240) / 480, z / max_height) for x, _, z in vertices]
+    lines.extend(f"vt {u:.4f} {v:.4f}" for u, v in coordinates)
+    if smooth:
+        lines.append("s 1")
     # MeshDescription computes the face normal with the reversed cross product.
     lines.extend("f " + " ".join(f"{index + 1}/{index + 1}" for index in reversed(face)) for face in faces)
     file = directory / f"{name}.obj"
@@ -108,7 +147,7 @@ def import_mesh(asset_tools, directory, name, mesh):
     if not isinstance(mesh, unreal.StaticMesh):
         raise RuntimeError(f"Could not import mesh {name}")
     bounds = mesh.get_bounding_box()
-    if bounds.max.z < max_height * 0.95 or bounds.max.z > max_height * 1.05 or bounds.min.z < -20:
+    if bounds.max.z < max_height * 0.95 or bounds.max.z > max_height * 1.05 or bounds.min.z < -40:
         raise RuntimeError(f"Unexpected orientation or scale for {name}: {bounds}")
     if not ASSETS.save_loaded_asset(mesh, only_if_is_dirty=False):
         raise RuntimeError(f"Could not save mesh {name}")
@@ -127,4 +166,6 @@ def build_foliage(asset_tools):
 def build_spoil(asset_tools):
     unreal.SystemLibrary.execute_console_command(None, "Interchange.FeatureFlags.Import.SyncToBrowser 0")
     with tempfile.TemporaryDirectory(prefix="MudSpoil-") as folder:
-        import_mesh(asset_tools, Path(folder), "SpoilClump", spoil_clump())
+        import_mesh(asset_tools, Path(folder), "SpoilClump", spoil_clump(), smooth=True)
+        import_mesh(asset_tools, Path(folder), "QuarryFragment", quarry_fragment())
+        import_mesh(asset_tools, Path(folder), "CargoSurface", cargo_surface(), smooth=True)

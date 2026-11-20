@@ -39,6 +39,8 @@ inline void AccumulateMouseDrag(HydraulicInput& Input, bool Left, bool Right, Mo
     if (Tool == MouseTool::Blade)
     {
         Input.Boom += Y;
+        if(Left&&Right)Input.Tilt+=X;
+        else Input.Swing += X;
         return;
     }
     if (Tool == MouseTool::Loader)
@@ -60,12 +62,12 @@ inline void AccumulateMouseDrag(HydraulicInput& Input, bool Left, bool Right, Mo
     else if (Left)
     {
         Input.Boom += Y;
-        Input.Swing += X;
+        Input.Curl += X;
     }
     else
     {
         Input.Stick += Y;
-        Input.Curl += X;
+        Input.Swing += X;
     }
 }
 
@@ -81,6 +83,17 @@ inline void AddExcavatorKeys(HydraulicInput& Input, bool Shift, double Across, d
         Input.Boom += Vertical;
         Input.Swing += Across;
     }
+}
+
+inline void AccumulateExcavatorGamepad(HydraulicInput& Input, bool Left, bool Right, double X, double Y)
+{
+    if (Left && Right)
+    {
+        Input.Tilt += X;
+        Input.Curl += Y;
+    }
+    else if (Left || Right)
+        AddExcavatorKeys(Input, Right, X, Y);
 }
 
 inline double Approach(double Current, double Target, double MaxRate, double Dt, double Response)

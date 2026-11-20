@@ -174,8 +174,9 @@ void UMudAudio::Mix(float Dt, const AMudTerrain& Terrain, FVector2D Focus, AMudM
     const float Cut = FMath::Sqrt(FMath::Clamp(Work.EarthFlow * 0.17f, 0.0f, 1.0f)) * 0.73f;
     Loop(Hydraulic, Working ? Working->GetActorLocation() + FVector(0, 0, 160) : Body, Work.Hydraulic * 0.48f,
         0.79f + Work.Hydraulic * 0.46f, Dt, Filter);
-    Loop(Soil, Edge, Work.Material == Earthwork::Material::Soil ? Cut : 0, 0.87f + Cut * 0.29f, Dt, Filter);
-    Loop(Gravel, Edge, Work.Material == Earthwork::Material::Soil ? 0 : Cut, Work.Material == Earthwork::Material::Rock ? 0.82f : 1.0f, Dt, Filter);
+    const bool bAggregate = Earthwork::IsAggregate(Work.Material);
+    Loop(Soil, Edge, bAggregate ? 0 : Cut, 0.87f + Cut * 0.29f, Dt, Filter);
+    Loop(Gravel, Edge, bAggregate ? Cut : 0, Work.Material == Earthwork::Material::Rock ? 0.82f : 1.0f, Dt, Filter);
 
     FVector Bucket = Body;
     float GravelRattle = 0;
@@ -203,7 +204,7 @@ void UMudAudio::Mix(float Dt, const AMudTerrain& Terrain, FVector2D Focus, AMudM
     }
     Loop(GravelLift, Bucket, GravelRattle, GravelPitch, Dt, Filter);
 
-    const FVector RiverSource = Terrain.RiverSoundPoint(Focus.Y);
+    const FVector RiverSource = Terrain.WaterSoundPoint(Focus);
     Loop(River, RiverSource, FVector2D::DistSquared(Focus, FVector2D(RiverSource.X, RiverSource.Y) / 100) < FMath::Square(38.0) ? 0.45f : 0,
         1, Dt, bCab ? 900 : 13000);
     Loop(Wind, FVector::ZeroVector, bCab ? 0.105f : 0.29f, 1, Dt, bCab ? 750 : 8500);
@@ -265,7 +266,7 @@ void UMudAudio::Footstep(const AMudTerrain& Terrain, FVector Location, float Str
     const TCHAR* Name;
     if (Terrain.WaterDepth(Cell) > 0.035)
         Name = B ? TEXT("StepWaterB") : TEXT("StepWaterA");
-    else if (Terrain.Surface(Cell) != Earthwork::Material::Soil)
+    else if (Earthwork::IsAggregate(Terrain.Surface(Cell)))
         Name = B ? TEXT("StepStoneB") : TEXT("StepStoneA");
     else if (Terrain.Wetness(Cell) > 0.53)
         Name = B ? TEXT("StepMudB") : TEXT("StepMudA");

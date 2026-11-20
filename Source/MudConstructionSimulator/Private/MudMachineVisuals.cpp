@@ -271,6 +271,10 @@ void AMudMachine::BuildCabControls(USceneComponent* Cab, FVector Size)
     const double SeatHeight = Size.Z * 0.26;
     const FVector Eye(-Size.X * 0.19, DriverY, Size.Z * 0.79);
     CabEye = Pivot(Cab, Eye);
+    const double HipHeight = SeatHeight + 15.0;
+    DriverSeat = Pivot(Cab, {SeatX - 4.0, DriverY, HipHeight});
+    // The excavator has less headroom than the large transport cabs.
+    DriverSeat->SetRelativeScale3D(FVector(FMath::Clamp((Size.Z - HipHeight - 5.0) / 96.0, 0.84, 1.0)));
 
     // Trim goes inside the glass and below the original window opening.
     Part(TEXT("Cube"), TEXT("CabFloor"), Cab, {0, 0, 3}, {Size.X * 0.0096, Size.Y * 0.0094, 0.061});
@@ -650,19 +654,21 @@ void AMudMachine::BuildDozerBody(const TCHAR* Paint)
     RepeatedBoxes(TEXT("Steel"), Frame, Grille);
     MachineMark(*this, Frame, TEXT("CAT"), {201, 0, 203}, 0, 11);
 
-    const FVector2D PushBeam[] = {{-18, -15}, {146, -17}, {320, -15}, {DozerPushLength + 8, -10},
-        {DozerPushLength + 8, 11}, {320, 17}, {146, 20}, {-18, 15}};
+    const FVector2D PushBeam[] = {{-18, -15}, {146, -17}, {320, -15}, {DozerPushLength - 72, -10},
+        {DozerPushLength - 72, 11}, {320, 17}, {146, 20}, {-18, 15}};
     FSurface Handrails;
     for (const double Side : {-1.0, 1.0})
     {
         const double Y = Side * DozerPushHalfWidth;
         BevelBody(DozerPushArms, Paint, PushBeam, Y, 10.5, 4, true);
-        Part(TEXT("Cylinder"), Paint, Frame, DozerPushPivot + FVector(0, Side * 143, 0),
-            {0.37, 0.37, 0.40}, FRotator(0, 0, 90));
+        Part(TEXT("Cylinder"), Paint, Frame, DozerPushPivot + FVector(0, Y, 0),
+            {0.37, 0.37, 0.10}, FRotator(0, 0, 90));
         Part(TEXT("Cylinder"), TEXT("Steel"), DozerPushArms, {0, Y + Side * 11, 0},
             {0.23, 0.23, 0.047}, FRotator(0, 0, 90));
-        Part(TEXT("Cylinder"), TEXT("Steel"), Tool, DozerBladePin + FVector(0, Y + Side * 10, 0),
-            {0.26, 0.26, 0.14}, FRotator(0, 0, 90));
+        Part(TEXT("Cube"),Paint,Frame,{150,Side*94,185},{.34,.52,.36});
+        const FVector A(DozerPushLength-80,Y,0),B(DozerPushLength,0,0),Span=B-A;
+        Part(TEXT("Cube"),Paint,DozerPushArms,(A+B)*.5,{Span.Size()/100,.18,.28},FRotationMatrix::MakeFromX(Span).Rotator());
+        Part(TEXT("Cube"),Paint,DozerPushArms,{DozerPushLength-40,Side*78,9},{.25,.22,.34});
         const FVector2D Tower[] = {{128, 99}, {177, 99}, {180, 150}, {163, 179}, {141, 174}, {126, 132}};
         BevelBody(Frame, Paint, Tower, Side * 77, 11, 4);
         const FVector2D ServiceDoor[] = {{-5, 131}, {148, 131}, {156, 155}, {143, 192}, {0, 205}};
@@ -688,6 +694,7 @@ void AMudMachine::BuildDozerBody(const TCHAR* Paint)
         Part(TEXT("Cube"), TEXT("Headlight"), Frame, {-166, Side * 74, 321}, {0.025, 0.15, 0.085});
     }
     RepeatedBoxes(TEXT("Chassis"), Frame, Louvers);
+    Part(TEXT("Sphere"),TEXT("Steel"),DozerPushArms,{DozerPushLength,0,0},{.24,.24,.24});
     RepeatedBoxes(TEXT("Steel"), Frame, Treads);
     auto* Rails = Skin(*this, Frame);
     Handrails.Apply(*Rails, 0, TEXT("Chassis"));
@@ -700,7 +707,8 @@ void AMudMachine::BuildDozerBody(const TCHAR* Paint)
 
 void AMudMachine::BuildBlade(const TCHAR* Paint)
 {
-    const FVector2D Curve[] = {{12, -26.5}, {0, -11}, {-9, 8}, {-16, 30}, {-15, 52}, {-6, 74}, {13, 94}};
+    FVector2D Curve[DozerRig::Profile.size()];
+    for(size_t I=0;I<DozerRig::Profile.size();++I)Curve[I]={DozerRig::Profile[I].X,DozerRig::Profile[I].Z};
     const double Stations[] = {-172, -147, -117, 117, 147, 172};
     const auto Point = [](FVector2D Profile, double Y, double Thickness = 0)
     {
@@ -708,7 +716,7 @@ void AMudMachine::BuildBlade(const TCHAR* Paint)
     };
     constexpr int32 Last = UE_ARRAY_COUNT(Curve) - 1;
     constexpr double Thickness = 8;
-    FSurface Face, Back, CuttingSteel, Scuffs;
+    FSurface Face, Back, CuttingSteel;
     for (int32 Span = 0; Span < UE_ARRAY_COUNT(Stations) - 1; ++Span)
     {
         const double L = Stations[Span], R = Stations[Span + 1];
@@ -737,16 +745,6 @@ void AMudMachine::BuildBlade(const TCHAR* Paint)
     Face.Apply(*Mesh, 0, TEXT("WornSteel"));
     Back.Apply(*Mesh, 1, Paint);
     CuttingSteel.Apply(*Mesh, 2, TEXT("CuttingEdge"));
-    for (int32 I = -8; I <= 8; ++I)
-    {
-        const double Y = I * 18.0;
-        const double Width = 1.2 + (I + 8) % 4 * 1.1;
-        const FVector2D Low = FMath::Lerp(Curve[1], Curve[2], 0.18) + FVector2D(0.18, 0);
-        const FVector2D High = FMath::Lerp(Curve[1], Curve[2], 0.48 + ((I + 8) % 5) * 0.09) + FVector2D(0.18, 0);
-        Scuffs.Quad(Point(Low, Y - Width), Point(Low, Y + Width), Point(High, Y + 0.7), Point(High, Y - 0.3),
-            FVector::ForwardVector);
-    }
-    Scuffs.Apply(*Mesh, 3, TEXT("CuttingEdge"));
     Mesh->RegisterComponent();
 
     TArray<FTransform> Fasteners;
@@ -757,14 +755,20 @@ void AMudMachine::BuildBlade(const TCHAR* Paint)
     }
     RepeatedBoxes(TEXT("Steel"), Tool, Fasteners);
 
-    const FVector2D Brace[] = {{-41, 10}, {-13, -4}, {8, 15}, {5, 50}, {-14, 67}, {-31, 52}};
-    const FVector2D LiftEar[] = {{-33, 52}, {-11, 52}, {-5, 83}, {-15, 92}, {-29, 85}};
+    const FVector2D Brace[] = {{-84, 10}, {-45, 1}, {-29, 15}, {-29, 50}, {-42, 67}, {-77, 52}};
+    const FVector2D LiftEar[] = {{-66, 52}, {-32, 52}, {-29, 76}, {-45, 92}, {-63, 85}};
     for (const double Side : {-1.0, 1.0})
     {
-        BevelBody(Tool, Paint, Brace, Side * DozerPushHalfWidth, 12, 3);
-        BevelBody(Tool, Paint, LiftEar, Side * 98, 7, 2.5);
+        BevelBody(Tool, Paint, Brace, Side * 85, 12, 3);
     }
-    Part(TEXT("Cube"), Paint, Tool, {-22, 0, 37}, {0.26, 2.53, 0.22});
+    BevelBody(Tool,Paint,LiftEar,-60,7,2.5);
+    Part(TEXT("Cube"),Paint,DozerYawCarrier,{-45,0,20},{.18,1.22,.18});
+    Part(TEXT("Cube"),Paint,DozerYawCarrier,{-45,0,10},{.18,.24,.20});
+    Part(TEXT("Cube"),Paint,DozerYawCarrier,{-22.5,0,0},{.45,.24,.18});
+    Part(TEXT("Cube"),Paint,DozerYawCarrier,{-45,-55,5},{.12,.07,.30});
+    Part(TEXT("Cube"), Paint, Tool, {-61, 0, 32}, {0.70, 2.03, 0.22});
+    Part(TEXT("Cube"),Paint,Tool,{-40,0,49},{.23,.25,.22});
+    Part(TEXT("Sphere"),TEXT("Steel"),Tool,DozerBladePin,{.19,.19,.19});
 }
 
 void AMudMachine::BuildTyreShell(USceneComponent* Hub, double WidthScale)
@@ -959,11 +963,13 @@ void AMudMachine::BuildLoaderBody(const TCHAR* Paint)
     Part(TEXT("Cylinder"), TEXT("Steel"), Front, {0, 0, 103}, {0.33, 0.33, 0.56});
     Part(TEXT("Cube"), TEXT("Chassis"), Front, {25, 0, 101}, {0.53, 0.60, 0.35});
     Part(TEXT("Cube"), TEXT("Chassis"), RearFrame, {-28, 0, 101}, {0.55, 0.60, 0.40});
-    const FVector2D TiltSupport[] = {{61, 102}, {103, 102}, {105, 141}, {97, 158}, {76, 164}, {61, 151}};
-    BevelBody(Front, TEXT("Chassis"), TiltSupport, 0, 14, 5);
+    const FVector2D TiltSupport[] = {{8, 24}, {42, 24}, {43, 59}, {35, 72}, {17, 72}, {8, 59}};
+    BevelBody(BoomPivot, Paint, TiltSupport, 0, 14, 4);
+    Part(TEXT("Cylinder"), TEXT("Steel"), BoomPivot, {LoaderRig::TiltBase.X, 0, LoaderRig::TiltBase.Z},
+        {0.22, 0.22, 0.36}, FRotator(0, 0, 90));
 
     const auto LiftArm = LoaderProfile(LoaderRig::ArmProfile);
-    const FVector2D Tower[] = {{38, 73}, {114, 73}, {121, 111}, {96, 151}, {67, 159}, {39, 145}, {34, 107}};
+    const FVector2D Tower[] = {{35, 73}, {120, 73}, {122, 126}, {96, 192}, {69, 213}, {42, 205}, {31, 130}};
     const FVector2D Vent[] = {{-310, 144}, {-188, 144}, {-169, 177}, {-283, 178}, {-306, 168}};
     const auto Rocker = LoaderProfile(LoaderRig::RockerProfile);
     LoaderRocker = Pivot(BoomPivot, {LoaderRig::RockerPin.X, 0, LoaderRig::RockerPin.Z});
@@ -999,8 +1005,8 @@ void AMudMachine::BuildLoaderBody(const TCHAR* Paint)
         Part(TEXT("Cube"), TEXT("Steel"), RearFrame, {-35, Side * 100, 99}, {0.39, 0.23, 0.055});
         Part(TEXT("Cube"), TEXT("Steel"), RearFrame, {-35, Side * 105, 73}, {0.38, 0.21, 0.052});
         const double Y = Side * 39;
-        const FVector LiftLine[] = {{9, Y, 19}, {30, Y, 22}, {68, Y, 30}, {108, Y, 33}, {140, Y, 29},
-            {183, Y, 27}, {216, Y, 20}, {234, Y, 17}};
+        const FVector LiftLine[] = {{9, Y, 19}, {30, Y, 22}, {68, Y, 30}, {108, Y, 33}, {166, Y, 29},
+            {218, Y, 27}, {253, Y, 20}, {275, Y, 17}};
         LiftPipes.Tube(LiftLine, 1.6);
         const FVector Handrail[] = {{-57, Side * 90, 120}, {-61, Side * 94, 146}, {-58, Side * 93, 176},
             {-51, Side * 87, 191}, {-48, Side * 79, 193}};

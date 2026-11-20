@@ -8,3 +8,8 @@ De fyra 2K-materialen används i marken och på lassens ytor. Färgtexturen inne
 - Gräsmark [Grass Ground](https://polyhaven.com/a/grass_ground)
 
 Materialen är hämtade från Poly Haven under [CC0](https://polyhaven.com/license). Krossberg använder grusskanningen i grövre skala med kallare färg.
+
+`tools/prepare-surfaces.mjs` skapar reproducerbara, filtrerade 2048px-varianter i `Prepared/`.
+Sand härleds från jordskanningen, lera från den våta lerskanningen och berg från gruset.
+Färgkontrast och råhet filtreras separat; originalfilerna ändras inte. Dessa är bearbetade
+CC0-material, inte ytterligare fotografiska skanningar. Se `TERRAIN-RENDERING.md` för rendering och verifiering.

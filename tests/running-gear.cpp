@@ -11,6 +11,9 @@ static void Near(double Actual, double Expected, double Tolerance = 1e-9)
 
 int main()
 {
+    SoilDrivetrain LowReverse;double Speed=0,Travel=0;
+    for(int I=0;I<600;++I){Speed=LowReverse.Advance(Speed,-.7,2.35,.8,0,.5,1,-.18,true,false,1./60);Travel+=Speed/60;}
+    assert(Travel<-3); // Reverse uphill with the same engine/traction caps, in low range.
     constexpr double Radius = 0.65;
     Near(RollDegrees(2 * Pi * Radius, Radius), -360);
     Near(RollDegrees(-2 * Pi * Radius, Radius), 360);
@@ -73,8 +76,17 @@ int main()
     const auto StraightPress = PressGround(0, 1, 1, 0.25, 0, true);
     Near(ContactSink(1, 0.1, 1, false), 0);
     Near(ContactSink(0, 1.0, 1, false), 0);
+    Near(ContactSink(1, 0.1, 1, false, 1), 0);
     assert(ContactSink(1, 1.0, 1, false) > ContactSink(1, 1.0, 0, false) * 2);
     assert(ContactSink(1, 0.95, 1, true) < ContactSink(1, 0.95, 1, false));
+    const double FreshMud = ContactSink(1, 0.95, 0, false);
+    const double ChurnedMud = ContactSink(1, 0.95, 0, false, 0.85);
+    assert(ChurnedMud > FreshMud * 2);
+    Near(MudMobility(0, 0.85, 1, false, false), 1);
+    assert(MudMobility(FreshMud, 0.25, 0, false, false) > 0.40);
+    Near(MudMobility(ChurnedMud, 0.12, 0, false, false), 0);
+    assert(MudMobility(0.31, 0.18, 0, false, true) > MudMobility(0.31, 0.18, 0, false, false));
+    assert(MudMobility(ContactSink(1, 0.95, 1, true, 0.85), 0.48, 1, true, false) > 0.30);
     assert(PressGround(0, 1, 1, 0.95, 0.6, false, 1.5).Depth > PressGround(0, 1, 1, 0.95, 0, false).Depth * 2);
     const auto TurningPress = PressGround(0, 1, 1, 0.25, 1, true);
     const auto MudPress = PressGround(0, 1, 1, 0.95, 1, true);

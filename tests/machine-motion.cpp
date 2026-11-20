@@ -15,16 +15,16 @@ int main()
     AccumulateMouseDrag(Left, true, false, MouseTool::Excavator, 0.6, -0.4);
     Near(Left.Boom, -0.4);
     Near(Left.Stick, 0);
-    Near(Left.Curl, 0);
-    Near(Left.Swing, 0.6);
+    Near(Left.Curl, 0.6);
+    Near(Left.Swing, 0);
     Near(Left.Tilt, 0);
 
     HydraulicInput Right;
     AccumulateMouseDrag(Right, false, true, MouseTool::Excavator, -0.3, 0.7);
     Near(Right.Boom, 0);
     Near(Right.Stick, 0.7);
-    Near(Right.Curl, -0.3);
-    Near(Right.Swing, 0);
+    Near(Right.Curl, 0);
+    Near(Right.Swing, -0.3);
     Near(Right.Tilt, 0);
 
     HydraulicInput Both;
@@ -54,7 +54,9 @@ int main()
     Near(Blade.Boom, -0.3);
     Near(Blade.Stick, 0);
     Near(Blade.Curl, 0);
-    Near(Blade.Swing, 0);
+    Near(Blade.Swing, 2.0);
+    AccumulateMouseDrag(Blade,true,true,MouseTool::Blade,.7,.2);
+    Near(Blade.Tilt,.7);Near(Blade.Swing,2.0);Near(Blade.Boom,-.1);
 
     HydraulicInput Loader;
     AccumulateMouseDrag(Loader, true, false, MouseTool::Loader, 0.8, 0.6);

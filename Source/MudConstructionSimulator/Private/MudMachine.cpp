@@ -3,6 +3,7 @@
 
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/BoxComponent.h"
 #include "Engine/StaticMesh.h"
 #include "MachineMotion.h"
 #include "Materials/MaterialInterface.h"
@@ -10,6 +11,8 @@
 #include "MudTerrain.h"
 #include "ProceduralMeshComponent.h"
 #include "RunningGear.h"
+#include "TerrainPassage.h"
+#include "TrackGround.h"
 
 namespace
 {
@@ -21,17 +24,29 @@ struct FSpec
     double Capacity, Speed, Mass, Turn, Clearance, Footprint;
 };
 
+constexpr double DumperSteeringDegrees = 24.0;
+
 constexpr FSpec Specs[] = {
     { TEXT("Cat D6"), TEXT("Amber"), 6, 4.2, 19, 68, 1.30, 1.45 },
     { TEXT("Volvo EC300E"), TEXT("Amber"), 3.2, 3.6, 24, 48, 1.30, 1.45 },
-    { TEXT("Volvo A30G"), TEXT("Amber"), 16, 10.5, 17, 32, 1.06, 1.48 },
+    { TEXT("Volvo A30G"), TEXT("Amber"), 16, 10.5, 17, DumperSteeringDegrees, 1.06, 1.48 },
     { TEXT("Volvo FMX 6x6"), TEXT("Teal"), 24, 13.5, 15, 29, 1.05, 1.46 },
     { TEXT("Volvo L120H"), TEXT("Amber"), 3.4, 8.0, 20, 36, 0.80, 1.48 }
 };
 
 const FSpec& Spec(EMudMachine Kind) { return Specs[static_cast<uint8>(Kind)]; }
 
-constexpr const TCHAR* CargoPaint[] = { TEXT("Loose"), TEXT("LooseGravel"), TEXT("LooseRock") };
+constexpr const TCHAR* CargoPaint[] = { TEXT("Loose"), TEXT("LooseGravel"), TEXT("LooseRock"), TEXT("LooseSand"), TEXT("LooseClay") };
+constexpr const TCHAR* SurfacePaint[] = { TEXT("PayloadSoil"), TEXT("PayloadGravel"), TEXT("PayloadRock"), TEXT("PayloadSand"), TEXT("PayloadClay") };
+
+double CargoHeapHeight(double X, double Y)
+{
+    const double Profile = FMath::Max(0.0, 1.0 - FMath::Pow(FMath::Abs(X * 2), 2.8) - FMath::Pow(FMath::Abs(Y * 2), 2.2));
+    // Match the surface exported by unreal_foliage.cargo_surface().
+    const double Shape = 0.70 + 0.055 * FMath::Sin(X * 19 + Y * 12) + 0.035 * FMath::Sin(X * 31 - Y * 22);
+    return FMath::Pow(Profile, 0.87) * 100.0 * Shape;
+}
+
 const FVector BucketLip(-123, 0, -64);
 constexpr double BucketHalfWidthCm = 88;
 constexpr double BucketOuterToothCm = BucketHalfWidthCm - 10;
@@ -58,7 +73,10 @@ constexpr double TyreRadiusM = 0.656;
 
 UMaterialInterface* PaintMaterial(const TCHAR* Name)
 {
-    return LoadObject<UMaterialInterface>(nullptr, *FString::Printf(TEXT("/Game/Generated/%s.%s"), Name, Name));
+    auto* Paint = LoadObject<UMaterialInterface>(nullptr, *FString::Printf(TEXT("/Game/Generated/%s.%s"), Name, Name));
+    if (!Paint && (FCString::Strstr(Name, TEXT("Sand")) || FCString::Strstr(Name, TEXT("Clay"))))
+        Paint = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/Generated/Loose.Loose"));
+    return Paint;
 }
 
 FVector2D Horizontal(const FVector& Value) { return FVector2D(Value.X, Value.Y); }
@@ -71,12 +89,18 @@ const FVector AMudMachine::BucketMount(225, 0, 0);
 const FVector AMudMachine::StickRamPin(-38, 0, 59);
 const FVector AMudMachine::BucketRamBase(49, 0, 58);
 const FVector AMudMachine::DozerPushPivot(-115, 0, 51);
-const FVector AMudMachine::DozerBladePin(-18, 0, 30);
+const FVector AMudMachine::DozerBladePin(DozerRig::Pin.X, DozerRig::Pin.Y, DozerRig::Pin.Z);
 const FVector AMudMachine::TruckBedHinge(-389, 0, 140);
 
 AMudMachine::AMudMachine()
 {
     RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("MachineRoot"));
+    EnvironmentCollider=CreateDefaultSubobject<UBoxComponent>(TEXT("EnvironmentContact"));
+    EnvironmentCollider->SetupAttachment(RootComponent);
+    EnvironmentCollider->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+    EnvironmentCollider->SetCollisionObjectType(ECC_WorldDynamic);
+    EnvironmentCollider->SetCollisionResponseToAllChannels(ECR_Ignore);
+    EnvironmentCollider->SetCollisionResponseToChannel(ECC_PhysicsBody,ECR_Block);
 }
 
 USceneComponent* AMudMachine::Pivot(USceneComponent* Parent, FVector Offset)
@@ -141,7 +165,7 @@ void AMudMachine::BuildTyres()
             auto* Hub = Knuckle ? Pivot(Knuckle, FVector::ZeroVector) : Mount;
             Hub->SetRelativeScale3D(FVector(RadiusScale));
             Wheels.Add({Hub, Knuckle, Side * (OffsetM - (bDual ? 0.16 : 0.0)), RadiusM, 0,
-                RearFrame && AxleX < 0});
+                RearFrame && AxleX < 0, 0.26 * WidthScale * RadiusScale, bDual ? -Side * 0.32 : 0.0});
             BuildTyreShell(Hub, WidthScale);
             const double InnerTyreOffset = bDual ? -Side * 32.0 / RadiusScale : 0.0;
             if (bDual)
@@ -243,7 +267,7 @@ void AMudMachine::BuildTracks()
     }
 }
 
-void AMudMachine::UpdateTrack(FTrackRig& Track)
+void AMudMachine::UpdateTrack(FTrackRig& Track, const AMudTerrain* Terrain)
 {
     const bool bDozer = Kind == EMudMachine::Dozer;
     const double Spacing = (bDozer ? DozerBeltPath.Length() : BeltPath.Length()) / Track.Transforms.Num();
@@ -253,8 +277,16 @@ void AMudMachine::UpdateTrack(FTrackRig& Track)
     {
         const double Distance = Track.Phase + I * Spacing;
         const auto Shoe = bDozer ? DozerBeltPath.Sample(Distance) : BeltPath.Sample(Distance);
-        const FRotator Rotation(Shoe.Pitch, 0, 0);
-        const FVector ShoePosition(Shoe.Ahead * 100, Track.LateralM * 100, (Shoe.Height + AxleHeight) * 100);
+        FRotator Rotation(Shoe.Pitch, 0, 0);
+        FVector ShoePosition(Shoe.Ahead * 100, Track.LateralM * 100, (Shoe.Height + AxleHeight) * 100);
+        if(Terrain && Shoe.Height < -(bDozer?DozerTrackRadius:BeltPath.Radius)+.06)
+        {
+            const FVector World=GetActorTransform().TransformPosition(ShoePosition)/100;
+            // Limited bogie/shoe compliance follows depressions without stretching the
+            // upper belt or allowing the rigid frame to sink through a crest.
+            ShoePosition.Z+=FMath::Clamp((Terrain->Height(Horizontal(World))+.03-World.Z)*100/
+                FMath::Max(.5,GetActorUpVector().Z),-10.,6.);
+        }
         Track.Transforms[I] = FTransform(Rotation, ShoePosition, FVector(Spacing * 0.89, ShoeWidth, 0.059));
         Track.GrouserTransforms[I] = FTransform(Rotation, ShoePosition + Rotation.RotateVector({0, 0, 4}),
             FVector(Spacing * 0.23, ShoeWidth - 0.05, 0.036));
@@ -288,7 +320,7 @@ void AMudMachine::AnimateRunningGear(double Distance, double YawRadians, double 
         {
             const double Length = Kind == EMudMachine::Dozer ? DozerBeltPath.Length() : BeltPath.Length();
             Track.Phase = RunningGear::Wrap(Track.Phase + Travel, Length);
-            UpdateTrack(Track);
+        // Ground-conforming shoes are updated after the final support pose below.
         }
     }
 }
@@ -311,19 +343,12 @@ UProceduralMeshComponent* AMudMachine::BuildHeap(USceneComponent* Parent, FVecto
     Heap->SetRelativeLocation(PositionCm);
     Heap->SetRelativeScale3D(SizeM);
     Heap->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-    Heap->SetMaterial(0, PaintMaterial(TEXT("Loose")));
     TArray<FVector> Vertices, Normals;
     TArray<FVector2D> UV;
+    TArray<FProcMeshTangent> Tangents;
     TArray<int32> Indices;
     const int32 Across = Kind == EMudMachine::Dozer ? BladeHeapColumns : 25;
     const int32 Wide = Kind == EMudMachine::Dozer ? BladeHeapRows : 17;
-    const auto Top = [](double X, double Y)
-    {
-        const double Profile = FMath::Max(0.0, 1.0 - FMath::Pow(FMath::Abs(X * 2), 2.8) - FMath::Pow(FMath::Abs(Y * 2), 2.2));
-        const double Ridge = FMath::PerlinNoise2D(FVector2D(X * 6.4 + 1.7, Y * 4.2 - 0.8));
-        const double Clumps = FMath::PerlinNoise2D(FVector2D(X * 18.0 - 1.2, Y * 13.0));
-        return FMath::Pow(Profile, 0.87) * 100.0 * (0.69 + 0.37 * Ridge + 0.12 * Clumps);
-    };
     for (int32 Y = 0; Y < Wide; ++Y)
     {
         for (int32 X = 0; X < Across; ++X)
@@ -331,21 +356,126 @@ UProceduralMeshComponent* AMudMachine::BuildHeap(USceneComponent* Parent, FVecto
             const double U = static_cast<double>(X) / (Across - 1);
             const double V = static_cast<double>(Y) / (Wide - 1);
             const double CenteredX = U - 0.5, CenteredY = V - 0.5;
-            Vertices.Emplace(CenteredX * 100, CenteredY * 100, Top(CenteredX, CenteredY));
-            Normals.Add(FVector(Top(CenteredX - 0.02, CenteredY) - Top(CenteredX + 0.02, CenteredY),
-                Top(CenteredX, CenteredY - 0.02) - Top(CenteredX, CenteredY + 0.02), 4.0).GetSafeNormal());
-            UV.Emplace(U, V);
+            Vertices.Emplace(CenteredX * 100, CenteredY * 100, CargoHeapHeight(CenteredX, CenteredY));
+            const FVector Normal = FVector(
+                CargoHeapHeight(CenteredX - 0.02, CenteredY) - CargoHeapHeight(CenteredX + 0.02, CenteredY),
+                CargoHeapHeight(CenteredX, CenteredY - 0.02) - CargoHeapHeight(CenteredX, CenteredY + 0.02), 4.0).GetSafeNormal();
+            Normals.Add(Normal);
+            Tangents.Emplace(FVector::VectorPlaneProject(FVector::ForwardVector, Normal).GetSafeNormal(), false);
+            UV.Emplace(U * SizeM.X, V * SizeM.Y);
             if (X == 0 || Y == 0)
                 continue;
             const int32 Id = Y * Across + X;
             Indices.Append({Id - Across - 1, Id - 1, Id - Across, Id - Across, Id - 1, Id});
         }
     }
-    if (Kind == EMudMachine::Dozer)
-        BladeHeapShape = Vertices;
-    Heap->CreateMeshSection_LinearColor(0, Vertices, Indices, Normals, UV, {}, {}, false, false);
+    Heap->CreateMeshSection_LinearColor(0, Vertices, Indices, Normals, UV, {}, Tangents, false, false);
+    Heap->SetMaterial(0, PaintMaterial(TEXT("Loose")));
     Heap->RegisterComponent();
     return Heap;
+}
+
+void AMudMachine::BuildCargoSurface(USceneComponent* Parent, FVector PositionCm, FVector SizeM)
+{
+    auto* Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Generated/CargoSurface.CargoSurface"));
+    if (!Mesh)
+    {
+        Payload = BuildHeap(Parent, PositionCm, SizeM);
+        return;
+    }
+    CargoSurface = NewObject<UStaticMeshComponent>(this);
+    CargoSurface->SetupAttachment(Parent);
+    CargoSurface->SetRelativeLocation(PositionCm);
+    CargoSurface->SetRelativeScale3D(SizeM);
+    CargoSurface->SetStaticMesh(Mesh);
+    CargoSurface->SetMaterial(0, PaintMaterial(SurfacePaint[0]));
+    CargoSurface->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    CargoSurface->RegisterComponent();
+}
+
+void AMudMachine::UpdateCargoGrains(const UMeshComponent& Surface, double Fraction)
+{
+    const double Volume = Cargo.Volume();
+    if (Volume <= 0.02)
+    {
+        if (RenderedCargo.Volume() > 0.02)
+            for (auto* Grains : CargoGrains)
+                if (Grains)
+                    Grains->SetVisibility(false);
+        RenderedCargo = {};
+        return;
+    }
+
+    double Change = 0;
+    for (size_t KindIndex = 0; KindIndex < MaterialCount; ++KindIndex)
+        Change += FMath::Abs(Cargo.Volumes[KindIndex] - RenderedCargo.Volumes[KindIndex]);
+    if (RenderedCargo.Volume() > 0.02 && Change < Capacity() * 0.016)
+        return;
+    RenderedCargo = Cargo;
+
+    const FTransform HeapPose = Surface.GetRelativeTransform();
+    const int32 Count = FMath::Max(7, FMath::RoundToInt((TipBed ? 34 : 21) * FMath::Sqrt(Fraction)));
+    FRandomStream Scatter(631 + 47 * static_cast<int32>(Kind));
+    TArray<FTransform> Fragments[MaterialCount];
+    for (int32 I = 0; I < Count; ++I)
+    {
+        const double Slot = (I + 0.5) / Count;
+        size_t Choice = 0;
+        double Cumulative = Cargo.Volumes[0] / Volume;
+        while (Choice + 1 < MaterialCount && Slot >= Cumulative)
+            Cumulative += Cargo.Volumes[++Choice] / Volume;
+        const auto Type = static_cast<Material>(Choice);
+        if (Type == Material::Sand || Type == Material::Clay) continue;
+        const double Radius = FMath::Sqrt(Scatter.FRand());
+        const double Angle = Scatter.FRandRange(0, UE_TWO_PI);
+        const double X = Radius * FMath::Cos(Angle) * 0.43, Y = Radius * FMath::Sin(Angle) * 0.44;
+        const double SizeRoll = Scatter.FRand();
+        const double Size = (Type == Material::Gravel ? FMath::Lerp(0.025, 0.065, SizeRoll) :
+            Type == Material::Rock ? FMath::Lerp(0.092, 0.235, SizeRoll) : FMath::Lerp(0.028, 0.065, SizeRoll))
+            * FMath::Lerp(0.54, 1.0, FMath::Sqrt(Fraction));
+        const FVector Location = HeapPose.TransformPosition(FVector(X * 100, Y * 100, CargoHeapHeight(X, Y))) -
+            FVector(0, 0, Size * 13.0);
+        const FRotator Rotation(Scatter.FRandRange(-18, 18), Scatter.FRandRange(0, 360), Scatter.FRandRange(-20, 20));
+        Fragments[static_cast<size_t>(Type)].Emplace(Rotation, Location,
+            FVector(Scatter.FRandRange(0.84, 1.22), 1.0, Type == Material::Soil ? 0.67 : 0.89) * Size);
+    }
+
+    for (size_t KindIndex = 0; KindIndex < MaterialCount; ++KindIndex)
+    {
+        auto*& Grains = CargoGrains[KindIndex];
+        const auto& Pieces = Fragments[KindIndex];
+        if (Pieces.IsEmpty())
+        {
+            if (Grains)
+                Grains->SetVisibility(false);
+            continue;
+        }
+        if (!Grains)
+        {
+            auto* Mesh = KindIndex == 0 ? nullptr :
+                LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Generated/QuarryFragment.QuarryFragment"));
+            if (!Mesh)
+                Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Generated/SpoilClump.SpoilClump"));
+            if (!Mesh)
+                continue;
+            Grains = NewObject<UInstancedStaticMeshComponent>(this);
+            Grains->SetupAttachment(Surface.GetAttachParent());
+            Grains->SetStaticMesh(Mesh);
+            Grains->SetMaterial(0, PaintMaterial(CargoPaint[KindIndex]));
+            Grains->SetCastShadow(false);
+            Grains->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+            Grains->SetCullDistances(2400, 4000);
+            Grains->RegisterComponent();
+        }
+        Grains->SetVisibility(true);
+        if (Grains->GetInstanceCount() == Pieces.Num())
+            Grains->BatchUpdateInstancesTransforms(0, Pieces, false, true, true);
+        else
+        {
+            Grains->ClearInstances();
+            Grains->AddInstances(Pieces, false, false, false);
+        }
+    }
 }
 
 void AMudMachine::BuildBucket()
@@ -410,6 +540,8 @@ void AMudMachine::Initialize(EMudMachine Type, FVector2D Location, AMudTerrain& 
         return Part(TEXT("Cube"), Material, Parent, Offset, Size);
     };
     const TCHAR* Paint = Spec(Kind).Paint;
+    EnvironmentCollider->SetBoxExtent(FVector(Kind==EMudMachine::Truck?400:Kind==EMudMachine::Dumper?330:220,120,90));
+    EnvironmentCollider->SetRelativeLocation(FVector(0,0,130));
     auto* Root = GetRootComponent();
     const bool bTracked = Kind == EMudMachine::Excavator || Kind == EMudMachine::Dozer;
     if (Kind == EMudMachine::Dumper || Kind == EMudMachine::Loader)
@@ -456,18 +588,39 @@ void AMudMachine::Initialize(EMudMachine Type, FVector2D Location, AMudTerrain& 
         Part(TEXT("Cube"), TEXT("Chassis"), BucketTiltPivot, {-10, 0, -5}, {0.29, 0.46, 0.16});
         AddHydraulic(StickPivot, BucketRamBase, BucketLinkJoint, FVector::ZeroVector, 105, 0.15);
         BuildBucket();
-        Payload = BuildHeap(BucketTiltPivot, {-51, 0, BucketFloorCm + 10}, ExcavatorPayloadSize);
+        BuildCargoSurface(BucketTiltPivot, {-51, 0, BucketFloorCm + 10}, ExcavatorPayloadSize);
     }
     else if (Kind == EMudMachine::Dozer)
     {
         Tool = Pivot(Root, BladeMount);
         DozerPushArms = Pivot(Root, DozerPushPivot);
+        DozerYawCarrier=Pivot(DozerPushArms,{DozerPushLength,0,0});
+        Tool->AttachToComponent(DozerYawCarrier,FAttachmentTransformRules::KeepRelativeTransform);
         BuildDozerBody(Paint);
         for (const double Side : {-1.0, 1.0})
-            AddHydraulic(Root, {157, Side * 77, 161}, Tool, {-21, Side * 98, 72}, 88, 0.18);
+        {
+            AddHydraulic(Root, {150, Side * 110, 190}, DozerPushArms,
+                {DozerPushLength-40, Side*78, 15}, 100, .18);
+            AddHydraulic(DozerPushArms, {DozerPushLength-90, Side*DozerPushHalfWidth, 20}, Tool,
+                {-50, Side*85, 38}, 85, .14);
+        }
+        AddHydraulic(DozerYawCarrier,{-50,-55,-10},Tool,{-55,-60,76},40,.13);
         BuildBlade(Paint);
         Payload = BuildHeap(Root, {}, FVector::OneVector);
         Payload->SetAbsolute(true, true, true);
+        if (auto* ClumpMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Generated/SpoilClump.SpoilClump")))
+        {
+            BladeClods = NewObject<UInstancedStaticMeshComponent>(this);
+            BladeClods->SetupAttachment(Payload);
+            BladeClods->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+            BladeClods->SetCastShadow(false);
+            BladeClods->SetCullDistances(1800, 2800);
+            BladeClods->SetStaticMesh(ClumpMesh);
+            BladeClods->SetMaterial(0, PaintMaterial(TEXT("Loose")));
+            BladeClods->RegisterComponent();
+            for (int32 I = 0; I < BladeClodCount; ++I)
+                BladeClods->AddInstance(FTransform(FRotator::ZeroRotator, FVector::ZeroVector, FVector(0.001)));
+        }
     }
     else if (Kind == EMudMachine::Loader)
     {
@@ -478,13 +631,14 @@ void AMudMachine::Initialize(EMudMachine Type, FVector2D Location, AMudTerrain& 
         for (const double Side : {-1.0, 1.0})
         {
             const double Y = Side * LoaderRig::LiftArmAcross;
-            AddHydraulic(Root, {68, Y, 72}, BoomPivot, {155, Y, -2}, 104, 0.20);
+            AddHydraulic(Root, {LoaderRig::LiftBase.X, Y, LoaderRig::LiftBase.Z}, BoomPivot,
+                {LoaderRig::LiftRod.X, Y, LoaderRig::LiftRod.Z}, 170, 0.20);
             AddHydraulic(Root, {35, Side * 47, 89}, RearFrame, {-57, Side * 66, 89}, 63, 0.11);
         }
         BucketLink = Part(TEXT("Cube"), TEXT("Chassis"), BoomPivot, {}, {LoaderRig::LinkLength / 100, 0.14, 0.12});
-        AddHydraulic(Root, LoaderPin(LoaderRig::TiltBase), LoaderRocker, LoaderPin(LoaderRig::TiltRod), 96, 0.19);
+        AddHydraulic(BoomPivot, LoaderPin(LoaderRig::TiltBase), LoaderRocker, LoaderPin(LoaderRig::TiltRod), 148, 0.21);
         BuildLoaderBucket(145);
-        Payload = BuildHeap(Tool, {LoaderRig::Lip.X - 66, 0, -43}, {0.85, 2.15, 0.72});
+        BuildCargoSurface(Tool, {100, 0, -35}, {1.00, 2.65, 0.92});
     }
     else if (Kind == EMudMachine::Truck)
     {
@@ -494,7 +648,7 @@ void AMudMachine::Initialize(EMudMachine Type, FVector2D Location, AMudTerrain& 
         BuildTruckBody(Paint);
         BuildTruckBed();
         Tool = Pivot(TipBed, {-17, 0, 10});
-        Payload = BuildHeap(TipBed, {246, 0, 9}, {4.68, 2.24, 0.92});
+        BuildCargoSurface(TipBed, {246, 0, 9}, {4.68, 2.24, 0.92});
     }
     else
     {
@@ -506,9 +660,10 @@ void AMudMachine::Initialize(EMudMachine Type, FVector2D Location, AMudTerrain& 
                 {DumperHingeCm - 55, Side * 69, 82}, 75, 0.15);
         BuildHaulerBody(Paint);
         Tool = Pivot(TipBed, {-59, 0, 30});
-        Payload = BuildHeap(TipBed, {185, 0, 12}, {3.6, 2.14, 0.8});
+        BuildCargoSurface(TipBed, {185, 0, 12}, {3.6, 2.14, 0.8});
     }
     UpdatePose(Terrain);
+    if (TipBed) Terrain.RegisterMaterialReceiver(*this);
 }
 
 const TCHAR* AMudMachine::Name() const { return Spec(Kind).Name; }
@@ -643,25 +798,137 @@ void AMudMachine::Drive(double Dt, double Throttle, double Steering, bool bBrake
         return;
     const FVector2D PreviousPosition = Position;
     const double PreviousHeading = Heading;
+    for (auto& Wheel : Wheels)
+        if (!Wheel.LastImprint.IsSet())
+            Wheel.LastImprint = Horizontal(Wheel.Hub->GetComponentLocation()) / 100;
     const auto& Info = Spec(Kind);
-    const double LoadFraction = Cargo.Volume() / Capacity();
-    const double MassRatio = Info.Mass / (Info.Mass + Cargo.Mass());
+    const double CarriedMass = Kind==EMudMachine::Dozer?0:Cargo.Mass();
+    const double LoadFraction = Kind==EMudMachine::Dozer?0:Cargo.Volume() / Capacity();
+    const double MassRatio = Info.Mass / (Info.Mass + CarriedMass);
     Grip = Terrain.Grip(Position);
     Water = Terrain.WaterDepth(Position);
     const bool bTracked = Kind == EMudMachine::Excavator || Kind == EMudMachine::Dozer;
+    const FVector Up=GetActorUpVector();
+    const FVector2D BodyAcross=Horizontal(GetActorRightVector()).GetSafeNormal(),BodyForward(BodyAcross.Y,-BodyAcross.X);
+    const FVector2D BodyGradient=-Horizontal(Up)/FMath::Max(.5,Up.Z);
+    const double BodyClearance=(bTracked?.46:Kind==EMudMachine::Truck?.36:Kind==EMudMachine::Dumper?.45:.40)-LoadFraction*.06;
+    const double BodyHalfLength=bTracked?(Kind==EMudMachine::Dozer?DozerTrackHalfContact:BeltPath.HalfStraight):
+        Kind==EMudMachine::Truck?TruckFrontAxleCm/100:Kind==EMudMachine::Dumper?DumperFrontAxleCm/100:LoaderAxleCm/100;
+    const FVector2D BodyReach(bTracked?.72:.86,BodyHalfLength);
+    const double BodyShare=Terrain.CompactBody(Position,BodyAcross,BodyReach,
+        GetActorLocation().Z/100+BodyClearance/FMath::Max(.5,Up.Z),
+        {FVector2D::DotProduct(BodyGradient,BodyAcross),FVector2D::DotProduct(BodyGradient,BodyForward)},
+        (Info.Mass+CarriedMass)*9.81/(4*BodyReach.X*BodyReach.Y),Dt);
     SteeringCommand = MachineMotion::Approach(SteeringCommand, Steering, 5, Dt, 0.12);
     DriveCommand = MachineMotion::Approach(DriveCommand, bBrake ? 0 : Throttle, bBrake ? 12 : 6, Dt, 0.16);
     const FVector2D CurrentForward = Horizontal(FRotator(0, Heading, 0).Vector());
-    const double Grade = (Terrain.Height(Position + CurrentForward * 2) - Terrain.Height(Position - CurrentForward * 2)) * 0.25;
-    const double EffectiveGrip = bTracked ? FMath::Min(1.0, Grip + 0.37) : Grip;
+    double Grade = (Terrain.Height(Position + CurrentForward * 2) - Terrain.Height(Position - CurrentForward * 2)) * 0.25;
+    if(bTracked)
+    {
+        const FVector2D R(-CurrentForward.Y,CurrentForward.X);
+        const double Half=Kind==EMudMachine::Dozer?DozerTrackHalfContact:BeltPath.HalfStraight;
+        const double TrackRadius=Kind==EMudMachine::Dozer?DozerTrackRadius:BeltPath.Radius;
+        Grade=TrackGround::Fit([&](double X,double Y){return Terrain.Height(Position+CurrentForward*X+R*Y);},
+            Half,TrackRadius,Tracks.IsEmpty()?1.1:FMath::Abs(Tracks[0].LateralM),.305).Pitch;
+    }
     const double WaterLimit = FordingLimit(Info.Clearance, LoadFraction);
     const double MaxSpeed = IsBladeWorking() ? 2.35 : Info.Speed;
-    const double SpeedLimit = MaxSpeed * FMath::Sqrt(MassRatio) * FMath::Lerp(0.08, 1.0, EffectiveGrip);
-    const bool bTooSteep = Grade * DriveCommand > (0.23 + 0.47 * EffectiveGrip) * FMath::Lerp(0.62, 1.0, MassRatio);
-    const bool bBogged = !bTracked && LoadFraction > 0.5 && EffectiveGrip < 0.18;
-    const double Target = bTooSteep || bBrake || bBogged ? 0 :
-        DriveCommand * SpeedLimit * (DriveCommand < 0 ? 0.48 : 1.0);
-    Speed = MachineMotion::Approach(Speed, Target, bBrake ? 9.0 : 3.4 * MassRatio + 1, Dt, bBrake ? 0.08 : 0.20);
+    const double SpeedLimit = MaxSpeed * FMath::Sqrt(MassRatio);
+    double Sink = 0, PeakSink = 0, TotalGrip = 0, WeakestGrip = 1, Radius = 0;
+    int32 ContactCount = 0;
+    const double SlipSpeed = Drivetrain.WheelSpeed - Speed;
+    const auto SampleContact = [&](RunningGear::SoilContact& Soil, FVector2D Point, double ContactRadius, double CargoLoad,
+        double DistributedSink=-1,double DistributedGrip=-1)
+    {
+        const double Equilibrium = DistributedSink>=0?DistributedSink:Terrain.ContactSink(Point, bTracked, CargoLoad);
+        Soil.Advance(Equilibrium, SlipSpeed, Speed, Dt);
+        const double ContactGrip = (DistributedGrip>=0?DistributedGrip:Terrain.Grip(Point)) * (1.0 - Soil.Shear * 0.40 * FMath::Clamp(Equilibrium / 0.25, 0.0, 1.0));
+        Sink += Soil.Sink;
+        PeakSink = FMath::Max(PeakSink, Soil.Sink);
+        TotalGrip += ContactGrip;
+        WeakestGrip = FMath::Min(WeakestGrip, ContactGrip);
+        Radius += ContactRadius;
+        ++ContactCount;
+    };
+    if (bTracked)
+    {
+        const FVector2D Right(-CurrentForward.Y, CurrentForward.X);
+        const double HalfLength=Kind==EMudMachine::Dozer?DozerTrackHalfContact:BeltPath.HalfStraight;
+        const double Width=Kind==EMudMachine::Dozer?.61:.65;
+        const double PressureKPa = (Info.Mass + CarriedMass) * 9.81 / FMath::Max(1.0, Tracks.Num() * 2 * HalfLength * Width);
+        for (auto& Track : Tracks)
+        {
+            const double Pressure=FMath::Clamp(PressureKPa/80.,0.,1.);
+            double GroundSink=0,GroundGrip=0;
+            for(int I=0;I<5;++I)for(double Y:{-.2,0.,.2})
+            {
+                const double Weight=(I==2?3.:I==1||I==3?2.:1.)/27.;
+                const FVector2D P=Position+CurrentForward*((I-2)*HalfLength*.5)+Right*(Track.LateralM+Y);
+                GroundSink+=Terrain.ContactSink(P,true,Pressure)*Weight;
+                GroundGrip+=Terrain.Grip(P)*Weight;
+            }
+            SampleContact(Track.Soil,Position+Right*Track.LateralM,Kind==EMudMachine::Dozer?DozerTrackRadius:BeltPath.Radius,
+                Pressure,GroundSink,GroundGrip);
+        }
+    }
+    else
+    {
+        for (auto& Wheel : Wheels)
+        {
+            const bool bRear = Wheel.bOnRearFrame || Wheel.Hub->GetRelativeLocation().X < 0;
+            const double Share = Kind == EMudMachine::Loader ? (bRear ? 0.4 : 1.6) : (bRear ? 1.25 : 0.5);
+            const double ContactMass = Info.Mass / Wheels.Num() + Cargo.Mass() * Share / Wheels.Num();
+            const double Area = 4 * Wheel.ContactHalfWidthM * Wheel.RadiusM * 0.48 * (Wheel.InnerTyreOffsetM != 0 ? 2 : 1);
+            const double CargoLoad = FMath::Clamp(ContactMass * 9.81 / FMath::Max(0.05, Area) / 300.0, 0.0, 1.0);
+            SampleContact(Wheel.Soil, Horizontal(Wheel.Hub->GetComponentLocation()) / 100.0, Wheel.RadiusM, CargoLoad);
+        }
+    }
+    if (ContactCount > 0)
+    {
+        Sink = FMath::Lerp(Sink / ContactCount, PeakSink, 0.35);
+        Grip = FMath::Lerp(TotalGrip / ContactCount, WeakestGrip, 0.30);
+        Radius /= ContactCount;
+    }
+    const double EffectiveGrip = (bTracked ? FMath::Min(1.0, Grip + 0.37) : Grip)*(1-BodyShare);
+    DraftForceKN=0;
+    if(Kind==EMudMachine::Dozer && IsBladeWorking() && Throttle>=0 && Speed>-.05)
+    {
+        constexpr int Teeth=13;
+        for(int I=0;I<Teeth;++I)
+        {
+            const auto E=DozerRig::Edge(FMath::Lerp(-DozerRig::HalfBlade,DozerRig::HalfBlade,double(I)/(Teeth-1)));
+            const FVector P=Tool->GetComponentTransform().TransformPosition({E.X,E.Y,E.Z})/100;
+            const FVector2D XY=Horizontal(P);
+            const double Depth=FMath::Max(0.,Terrain.Height(XY)-P.Z);
+            DraftForceKN+=DozerRig::DraftKN(Terrain.Surface(XY),Terrain.Wetness(XY),3.44/Teeth,Depth,0,BladeYaw);
+        }
+        DraftForceKN+=DozerRig::DraftKN(Cargo.DominantMaterial(),Terrain.Wetness(Horizontal(ToolPoint())),0,0,Cargo.Mass(),BladeYaw);
+    }
+    else if(Kind==EMudMachine::Loader&&bBucketGround&&Curl>=-20&&Curl<=12&&Throttle>=0&&Speed>-.05)
+    {
+        for(int I=0;I<13;++I)
+        {
+            const FVector P=Tool->GetComponentTransform().TransformPosition(LoaderPin(LoaderRig::Lip)+
+                FVector(0,FMath::Lerp(-141.,141.,I/12.),0))/100;
+            const FVector2D XY=Horizontal(P);
+            DraftForceKN+=SoilDraft::DraftKN(Terrain.Surface(XY),Terrain.Wetness(XY),2.82/13,
+                FMath::Max(0.,Terrain.Height(XY)-P.Z),0,0);
+        }
+    }
+    const double PullKN=FMath::Min(Drivetrain.EnginePull(MassRatio,bTracked),EffectiveGrip*9.81)*(Info.Mass+CarriedMass)*FMath::Abs(DriveCommand);
+    const double ClimbKN=(Info.Mass+CarriedMass)*9.81*FMath::Max(0.,Grade*FMath::Sign(DriveCommand))/FMath::Sqrt(1+Grade*Grade);
+    double HullWorkKJ=bTracked&&!bBrake?FMath::Max(0.,PullKN-DraftForceKN-ClimbKN)*.10*Dt:0;
+    if(BodyShare>.001&&HullWorkKJ>Epsilon)
+    {
+        // Existing belly contact must also yield at zero ground speed. Waiting
+        // for a predicted move leaves a compacted centre ridge locking reverse.
+        HullWorkKJ-=Terrain.YieldBody(Position,BodyAcross,BodyReach,
+            GetActorLocation().Z/100+BodyClearance/FMath::Max(.5,Up.Z),
+            {FVector2D::DotProduct(BodyGradient,BodyAcross),FVector2D::DotProduct(BodyGradient,BodyForward)},HullWorkKJ);
+    }
+    Speed = Drivetrain.Advance(Speed, DriveCommand, SpeedLimit, EffectiveGrip, Sink, Radius, MassRatio, Grade, bTracked, bBrake, Dt,
+        DraftForceKN/(Info.Mass+CarriedMass)+BodyShare*9.81*Terrain.Grip(Position));
+    bBogged = Sink > 0.16 && FMath::Abs(Speed) < 0.12 && FMath::Abs(Drivetrain.WheelSpeed - Speed) > 0.65;
     const bool bDumper = Kind == EMudMachine::Dumper;
     const bool bTruck = Kind == EMudMachine::Truck;
     const bool bArticulated = RearFrame != nullptr;
@@ -690,7 +957,7 @@ void AMudMachine::Drive(double Dt, double Throttle, double Steering, bool bBrake
     if (bArticulated)
     {
         if (FMath::Abs(Steering) > 0.01 || FMath::Abs(Speed) > 0.08)
-            NextArticulation = MachineMotion::Approach(Articulation, -SteeringAtSpeed * ArticulationLimit(),
+            NextArticulation = MachineMotion::Approach(Articulation, -SteeringAtSpeed * (bDumper ? DumperSteeringDegrees : ArticulationLimit()),
                 bDumper ? 47 : 54, Dt, bDumper ? 0.16 : 0.13);
         PredictArticulated(DriveTravel);
     }
@@ -709,11 +976,15 @@ void AMudMachine::Drive(double Dt, double Throttle, double Steering, bool bBrake
             Next += (CurrentForward - NewForward) * (TruckRearSupportCm / 100);
         }
     }
-    if (IsBladeWorking() && Speed > 0 && bBucketGround && Terrain.HitsTree(Position + Forward * 3.1, 1.95, true))
+    if(FMath::Abs(DriveCommand)>.05||FMath::Abs(Speed)>.1)
     {
-        ++SoundImpact;
-        SoundImpactLevel = 0.65f;
-        bSoundTreeImpact = true;
+        const double ContactHeight=IsBladeWorking()?0.95:1.1;
+        const double WeightN=(Info.Mass+CarriedMass)*9810;
+        const double ForceN=WeightN*EffectiveGrip*FMath::Abs(DriveCommand)+
+            FMath::Min((Info.Mass+CarriedMass)*1000*Speed*Speed/.5,WeightN*6);
+        const FVector2D PushDirection=Forward*((FMath::Abs(Speed)>.1?Speed:DriveCommand)>=0?1:-1);
+        const double Nose=Kind==EMudMachine::Dozer?(IsBladeWorking()?3.1:1.4):Kind==EMudMachine::Truck?3.12:2.55;
+        Terrain.PushTrees(Next+PushDirection*Nose,1.3,PushDirection,ForceN,ContactHeight,Dt);
     }
     const auto Blocked = [&]()
     {
@@ -721,6 +992,49 @@ void AMudMachine::Drive(double Dt, double Throttle, double Steering, bool bBrake
         if (Next.X < 3 || Next.Y < 3 || Next.X > Terrain.GetWorldSize() - 3 || Next.Y > Terrain.GetWorldSize() - 3 ||
             (NextWater > WaterLimit && NextWater >= Water - 0.005))
             return true;
+        // Use terrain geometry, not an arbitrary maximum slope or a scripted road flag.
+        // Tracks have a shorter supported span and can bridge sharper changes in grade.
+        const double Rear=bTruck?TruckRearSupportCm/100:bDumper?DumperBogieCm/100:bTracked?-1.6:-LoaderAxleCm/100;
+        const double Front=bTruck?TruckRearSupportCm/100+TruckWheelbaseM:bDumper?DumperFrontAxleCm/100:bTracked?1.6:LoaderAxleCm/100;
+        const double Clearance=(bTracked?.46:bDumper?.45:bTruck?.36:.40)-LoadFraction*.06-Sink*.45;
+        const auto Penetration=[&](FVector2D P,double Yaw,double Bend)
+        {
+            const FVector2D F=Horizontal(FRotator(0,Yaw,0).Vector()),R(-F.Y,F.X);
+            if(bTracked)
+            {
+                const auto Ground=[&](double X,double Y){return Terrain.Height(P+F*X+R*Y);};
+                const double Half=Kind==EMudMachine::Dozer?DozerTrackHalfContact:BeltPath.HalfStraight;
+                const auto Support=TrackGround::Fit(Ground,Half,Radius,Tracks.IsEmpty()?1.1:FMath::Abs(Tracks[0].LateralM),.305);
+                double Depth=0;
+                for(int X=0;X<=14;++X)for(int Y=0;Y<=4;++Y)
+                {
+                    const double A=FMath::Lerp(-Half,Half,X/14.),B=FMath::Lerp(-.72,.72,Y/4.);
+                    Depth=FMath::Max(Depth,Ground(A,B)-Support.At(A,B)-Clearance);
+                }
+                return Depth;
+            }
+            return TerrainPassage::BellyPenetration([&](double X,double Y)
+            {
+                const FVector2D Center=bArticulated&&X<HingeOffsetCm()/100?
+                    RearFramePoint(P,Yaw,Bend,X):P+F*X;
+                const FVector2D Side=bArticulated&&X<HingeOffsetCm()/100?
+                    Horizontal(FRotator(0,Yaw+Bend+90,0).Vector()):R;
+                return Terrain.Height(Center+Side*Y);
+            },Rear,Front,Wheels.IsEmpty()?1.1:FMath::Abs(Wheels[0].LateralM),Clearance,.86);
+        };
+        double BeforeDepth=Penetration(Position,Heading,Articulation),AfterDepth=Penetration(Next,NextHeading,NextArticulation);
+        if(bTracked&&!bBrake&&FMath::Abs(DriveCommand)>.05&&TerrainPassage::Grounds(BeforeDepth,AfterDepth))
+        {
+            // A blunt hull can shear loose material, but only with the motor work
+            // left after blade draft. Never disable grounding or tunnel through rock.
+            const FVector2D F=Horizontal(FRotator(0,NextHeading,0).Vector()),R(-F.Y,F.X);
+            const auto Ground=[&](double X,double Y){return Terrain.Height(Next+F*X+R*Y);};
+            const double Half=Kind==EMudMachine::Dozer?DozerTrackHalfContact:BeltPath.HalfStraight;
+            const auto Support=TrackGround::Fit(Ground,Half,Radius,Tracks.IsEmpty()?1.1:FMath::Abs(Tracks[0].LateralM),.305);
+            HullWorkKJ-=Terrain.YieldBody(Next,R,{.72,Half},Support.Height+Clearance,{Support.Crossfall,Support.Pitch},HullWorkKJ);
+            BeforeDepth=Penetration(Position,Heading,Articulation);AfterDepth=Penetration(Next,NextHeading,NextArticulation);
+        }
+        if(TerrainPassage::Grounds(BeforeDepth,AfterDepth))return true;
         if (bArticulated || bTruck)
         {
             const auto HitsObstacle = [&](FVector2D Before, FVector2D After)
@@ -745,7 +1059,9 @@ void AMudMachine::Drive(double Dt, double Throttle, double Steering, bool bBrake
                 return false;
             };
             const FVector2D NewFront = Horizontal(FRotator(0, NextHeading, 0).Vector());
-            const double FrontProbe = bTruck ? 3.12 : (bDumper ? 2.55 : 1.65);
+            // Loader tyres end 2.43 m ahead of the articulation. The old 1.65 + 1.26 m
+            // capsule left a phantom half metre between the tyres and a receiving bed.
+            const double FrontProbe = bTruck ? 3.12 : (bDumper ? 2.55 : 1.18);
             if (HitsObstacle(Position + CurrentForward * FrontProbe, Next + NewFront * FrontProbe))
                 return true;
             const double RearProbe = Kind == EMudMachine::Loader ? -2.68 : -3.33;
@@ -806,8 +1122,7 @@ void AMudMachine::Drive(double Dt, double Throttle, double Steering, bool bBrake
     }
     const double Travel = bTracked ? FVector2D::DotProduct(Position - PreviousPosition, Forward) : DriveTravel;
     const double YawRadians = FMath::DegreesToRadians(FRotator::NormalizeAxis(Heading - PreviousHeading));
-    const double Spin = bBrake || RolledSide != 0 ? 0 : DriveCommand * Dt * (bTracked ? 0.85 : 2.8) *
-        FMath::Clamp((0.41 - Grip) / 0.26, 0.0, 1.0) * FMath::Clamp(1.0 - FMath::Abs(Speed) / 2.5, 0.0, 1.0);
+    const double Spin = RolledSide != 0 ? 0 : Drivetrain.WheelSpeed * Dt - Travel;
     AnimateRunningGear(Travel + Spin, YawRadians, FrontSteering, SteeringStep.RearTravel + Spin, SteeringStep.RearYaw);
     UpdatePose(Terrain);
     if (RolledSide != 0)
@@ -816,27 +1131,60 @@ void AMudMachine::Drive(double Dt, double Throttle, double Steering, bool bBrake
         (bTracked ? FMath::Abs(YawRadians) * BeltPath.HalfStraight : 0)) / Dt;
     SoundSteering = FMath::Clamp(FMath::Abs(SteeringStep.FrontYaw - SteeringStep.RearYaw) / Dt, 0.0, 1.0);
     TrackTravel += FMath::Max(FMath::Abs(Travel), FMath::Abs(SteeringStep.RearTravel));
-    TrackScrub += FMath::Abs(Spin) + (bTracked ? FMath::Abs(YawRadians) * BeltPath.HalfStraight : 0.0);
+    TrackScrub += FMath::Abs(Spin) + (bTracked ? FMath::Abs(YawRadians) * BeltPath.HalfStraight :
+        FMath::Abs(SteeringStep.FrontYaw - SteeringStep.RearYaw) * 0.55);
     const double ImprintDistance = TrackTravel + TrackScrub;
-    if (ImprintDistance < (bTracked ? 0.65 : 1.0))
+    if (ImprintDistance < (bTracked ? 0.65 : 0.30))
         return;
     const double Scrub = TrackScrub / ImprintDistance;
-    const double LoadFactor = 1.0 + LoadFraction * (bTracked ? 0.26 : 0.70);
+    const double ContactHalf=Kind==EMudMachine::Dozer?DozerTrackHalfContact:BeltPath.HalfStraight;
+    const double ContactWidth=Kind==EMudMachine::Dozer?.61:.65;
+    const double LoadFactor = bTracked ? FMath::Clamp((Info.Mass + CarriedMass) * 9.81 /
+        FMath::Max(1.0, Tracks.Num() * 2 * ContactHalf * ContactWidth) / 60.0, 0.2, 3.0) : 1.0;
     TrackTravel = TrackScrub = 0;
     if (bTracked)
     {
         for (const auto& Track : Tracks)
-            Terrain.PressTrack(Position + Side * Track.LateralM, Forward, BeltPath.HalfStraight,
-                0.79, FMath::Sign(Track.LateralM), Scrub, true, LoadFactor);
+            Terrain.PressTrack(Position + Side * Track.LateralM, Forward, ContactHalf,
+                ContactWidth*.5, FMath::Sign(Track.LateralM), Scrub, true, LoadFactor);
     }
     else
     {
-        const FVector2D RearForward = Horizontal(FRotator(0, Heading + Articulation, 0).Vector());
-        for (const auto& Wheel : Wheels)
-            Terrain.PressTrack(Horizontal(Wheel.Hub->GetComponentLocation()) / 100,
-                Wheel.bOnRearFrame ? RearForward :
-                    (Wheel.Knuckle ? Horizontal(Wheel.Knuckle->GetForwardVector()).GetSafeNormal() : Forward),
-                0.74, 0.67, FMath::Sign(Wheel.LateralM), Scrub, false, LoadFactor);
+        const FVector2D RearForward = Horizontal(FRotator(0, Heading + Articulation, 0).Vector()).GetSafeNormal();
+        for (auto& Wheel : Wheels)
+        {
+            const FVector2D Contact = Horizontal(Wheel.Hub->GetComponentLocation()) / 100;
+            const FVector2D PreviousContact = Wheel.LastImprint.GetValue();
+            Wheel.LastImprint = Contact;
+            const FVector2D ContactTravel = Contact - PreviousContact;
+            const double Distance = ContactTravel.Size();
+            // Recovery and restored positions start a new trail.
+            if (Distance > 5)
+                continue;
+            const FVector2D TyreForward = Wheel.bOnRearFrame ? RearForward :
+                (Wheel.Knuckle ? Horizontal(Wheel.Knuckle->GetForwardVector()).GetSafeNormal() :
+                    Horizontal(FRotator(0, Heading, 0).Vector()));
+            const FVector2D TyreRight(-TyreForward.Y, TyreForward.X);
+            const double LateralTravel = FVector2D::DotProduct(ContactTravel, TyreRight);
+            const double WheelScrub = FMath::Clamp(FMath::Max(Scrub, FMath::Abs(LateralTravel) / FMath::Max(0.05, Distance)), 0.0, 1.0);
+            const double Outward = FMath::Abs(LateralTravel) > 0.025 ? FMath::Sign(LateralTravel) : FMath::Sign(Wheel.LateralM);
+            const int32 Steps = FMath::Max(1, FMath::CeilToInt(Distance / 0.28));
+            const bool bRear = Wheel.bOnRearFrame || Wheel.Hub->GetRelativeLocation().X < 0;
+            const double Share = Kind == EMudMachine::Loader ? (bRear ? 0.4 : 1.6) : (bRear ? 1.25 : 0.5);
+            const double ContactMass = Info.Mass / Wheels.Num() + Cargo.Mass() * Share / Wheels.Num();
+            const double Area = 4 * Wheel.ContactHalfWidthM * Wheel.RadiusM * 0.48 * (Wheel.InnerTyreOffsetM != 0 ? 2 : 1);
+            const double ContactPressure = FMath::Clamp(ContactMass * 9.81 / FMath::Max(0.05, Area) / 100.0, 0.2, 3.5);
+            const double Pressure = ContactPressure * ImprintDistance / (0.55 * Steps);
+            const double HalfLength = Wheel.RadiusM * (0.48 + WheelScrub * 0.16);
+            for (int32 Step = 1; Step <= Steps; ++Step)
+            {
+                const FVector2D Point = FMath::Lerp(PreviousContact, Contact, double(Step) / Steps);
+                Terrain.PressTrack(Point, TyreForward, HalfLength, Wheel.ContactHalfWidthM, Outward, WheelScrub, false, Pressure);
+                if (Wheel.InnerTyreOffsetM != 0)
+                    Terrain.PressTrack(Point + TyreRight * Wheel.InnerTyreOffsetM, TyreForward,
+                        HalfLength, Wheel.ContactHalfWidthM, Outward, WheelScrub, false, Pressure);
+            }
+        }
     }
 }
 
@@ -884,6 +1232,8 @@ void AMudMachine::ToggleUnload()
 
 void AMudMachine::Halt()
 {
+    bBogged = false;
+    Drivetrain = {};
     Speed = DriveCommand = SteeringCommand = ValveA = ValveB = ValveCurl = ValveSwing = ValveTilt = 0;
     SoundTravel = SoundHydraulic = SoundSteering = SoundEarthFlow = 0;
 }
@@ -919,30 +1269,39 @@ void AMudMachine::StopWork()
     BladeFlowTravel = RenderedBladeTravel = 0;
     bGravitySpilling = false;
     MaterialMoved = 0;
+    LastWorkVolume=0;
+    DraftForceKN=0;LastBladePose.Reset();
     TrackTravel = TrackScrub = 0;
+    for (auto& Wheel : Wheels)
+    {
+        Wheel.LastImprint.Reset();
+        Wheel.Soil = {};
+    }
+    for (auto& Track : Tracks)
+        Track.Soil = {};
+    LastToolContact.Reset();
 }
 
 FVector AMudMachine::BladePosition(double Lift) const
 {
-    const double Z = BladeMount.Z + Lift * 100;
-    const double Rise = Z + DozerBladePin.Z - DozerPushPivot.Z;
-    const double Reach = FMath::Sqrt(FMath::Max(0.0, FMath::Square(DozerPushLength) - FMath::Square(Rise)));
-    return FVector(DozerPushPivot.X + Reach - DozerBladePin.X, BladeMount.Y, Z);
+    const auto P=DozerRig::Neutral(Lift);return {P.X,P.Y,P.Z};
 }
 
 double AMudMachine::BladeWingOffset(double AcrossCm)
 {
-    return FMath::Max(0.0, FMath::Abs(AcrossCm) - 117.0) * 0.50;
+    return DozerRig::Wing(AcrossCm);
 }
 
 double AMudMachine::BladeClearance(const AMudTerrain& Terrain, double Lift) const
 {
     const FTransform& Chassis = GetActorTransform();
-    const FVector Mount = BladePosition(Lift);
+    const auto O=DozerRig::Origin(Lift,BladeYaw,BucketTilt);
     double Clearance = TNumericLimits<double>::Max();
-    for (const double AcrossCm : {-150.0, 0.0, 150.0})
+    for (int I=0;I<=12;++I)
     {
-        const FVector Edge = Chassis.TransformPosition(Mount + BladeLip + FVector(BladeWingOffset(AcrossCm), AcrossCm, 0)) / 100;
+        const auto P=DozerRig::Edge(FMath::Lerp(-DozerRig::HalfBlade,DozerRig::HalfBlade,I/12.));
+        const auto R=DozerRig::BladeRotate(P,Lift,BladeYaw,BucketTilt);
+        const FVector Edge = Chassis.TransformPosition({O.X+R.X,O.Y+R.Y,O.Z+R.Z}) / 100;
         Clearance = FMath::Min(Clearance, Edge.Z - Terrain.Height(Horizontal(Edge)));
     }
     return Clearance;
@@ -960,51 +1319,91 @@ double AMudMachine::SampleBladeDatum(const AMudTerrain& Terrain) const
             Terrain.Height(Point + Across * 1.08)) * 0.25;
     };
     // Reference the grade ahead of the working strip and project it back to the cutting edge.
-    const double Near = SampleRow(1.25);
-    const double Rise = SampleRow(2.50) - Near;
-    return Near - FMath::Clamp(Rise, -0.22, 0.22);
+    const double Near = SampleRow(-2.0);
+    const double Rise = Near-SampleRow(-4.0);
+    return Near+FMath::Clamp(Rise,-.6,.6);
+}
+
+FVector AMudMachine::BedLoadPoint() const
+{
+    return TipBed ? TipBed->GetComponentTransform().TransformPosition(
+        FVector(Kind == EMudMachine::Truck ? 246 : 185, 0, 8)) / 100 : FVector::ZeroVector;
+}
+
+bool AMudMachine::InterceptMaterial(FVector From, FVector& To, FVector& Velocity, Load& Material, bool bReceive)
+{
+    if (!TipBed || RolledSide != 0 || (bReceive && Material.Volume() <= Epsilon)) return false;
+    const FTransform Pose = TipBed->GetComponentTransform();
+    const FVector A = Pose.InverseTransformPosition(From * 100);
+    const FVector B = Pose.InverseTransformPosition(To * 100);
+    const FVector Delta = B - A;
+    const bool bTruck = Kind == EMudMachine::Truck;
+    const double Front = bTruck ? TruckBedFrontCm - 8 : 365;
+    const double HalfWidth = bTruck ? 119 : 113;
+    const auto Rim = [bTruck](double X)
+    {
+        return bTruck ? 119.0 : FMath::Lerp(62.0, 103.0, FMath::Clamp(X / 365.0, 0.0, 1.0));
+    };
+    const double Floor = 8 + (bTruck ? 120 : 100) * FMath::Clamp(Cargo.Volume() / Capacity(), 0.0, 1.0);
+    double HitTime = 2;
+    FVector Normal = FVector::ZeroVector;
+    bool bFloor = false;
+    const auto Contact = [&](double T, FVector N, bool IsFloor)
+    {
+        if (T < 0 || T > 1 || T >= HitTime) return;
+        const FVector P = A + Delta * T;
+        if (P.X < 0 || P.X > Front || FMath::Abs(P.Y) > HalfWidth + 0.01 ||
+            P.Z < 0 || (!IsFloor && P.Z > (FMath::Abs(N.X) > 0 ? 119 : Rim(P.X)))) return;
+        HitTime = T; Normal = N; bFloor = IsFloor;
+    };
+    if (Delta.Z < -0.00001) Contact(A.Z <= Floor ? 0.0 : (Floor - A.Z) / Delta.Z, FVector::UpVector, true);
+    for (const double Side : {-1.0, 1.0})
+        if (FMath::Abs(Delta.Y) > 0.00001)
+            Contact((Side * HalfWidth - A.Y) / Delta.Y,
+                FVector(0, A.Y > HalfWidth ? 1 : (A.Y < -HalfWidth ? -1 : -Side), 0), false);
+    if (FMath::Abs(Delta.X) > 0.00001)
+    {
+        Contact((Front - A.X) / Delta.X, FVector(A.X > Front ? 1 : -1, 0, 0), false);
+        if (bTruck) Contact(-A.X / Delta.X, FVector(A.X < 0 ? -1 : 1, 0, 0), false);
+    }
+    if (HitTime > 1) return false;
+    FVector Hit = A + Delta * HitTime;
+    if (bReceive && bFloor && Bed.Angle < 8 && Cargo.Volume() < Capacity() - Epsilon)
+    {
+        const Load Received = Material.Take(FMath::Max(0.0, Capacity() - Cargo.Volume()));
+        Cargo.Receive(Received);
+        // The same cargo drives axle loads, rendering and save/load; no visual-only copies.
+    }
+    if (bFloor && Material.Volume() > Epsilon)
+    {
+        // Excess or a raised bed sheds over the nearest side, never disappears.
+        const double Side = Hit.Y >= 0 ? 1 : -1;
+        Hit = B;
+        Hit.Z = FMath::Max(Hit.Z, Floor + 0.1);
+        Velocity = Pose.TransformVectorNoScale(FVector(0, Side * 0.8, 0));
+    }
+    else
+    {
+        const FVector WorldNormal = Pose.TransformVectorNoScale(Normal).GetSafeNormal();
+        Velocity -= WorldNormal * FMath::Min(0.0, FVector::DotProduct(Velocity, WorldNormal)) * 1.15;
+        Hit += Normal * 0.5;
+    }
+    To = Pose.TransformPosition(Hit) / 100.0;
+    return true;
 }
 
 double AMudMachine::EmptyBucket(double Amount, AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
 {
     const FVector Point = ToolPoint();
     const FVector2D XY = Horizontal(Point);
-    if (Kind == EMudMachine::Excavator || Kind == EMudMachine::Loader)
-    {
-        for (auto* Other : Fleet)
-        {
-            if (!Other->TipBed || Other->IsTipping() || Other->RolledSide != 0)
-                continue;
-            const FVector Relative = Other->TipBed->GetComponentTransform().InverseTransformPosition(Point * 100);
-            const bool bTruck = Other->Kind == EMudMachine::Truck;
-            const double BedFront = bTruck ? TruckBedFrontCm - 5 : 377;
-            const double SideHeight = bTruck ? 119 : 95;
-            if (Relative.X < -12 || Relative.X > BedFront || FMath::Abs(Relative.Y) > 120)
-                continue;
-            const double Free = Other->Capacity() - Other->Cargo.Volume();
-            if (Relative.Z < SideHeight || Free <= Epsilon)
-            {
-                bBucketObstructed = true;
-                return 0;
-            }
-            const Load Released = Cargo.Take(FMath::Min(Amount, Free));
-            Other->Cargo.Receive(Released);
-            const double Fill = Other->Cargo.Volume() / Other->Capacity();
-            const double Floor = Other->TipBed->GetComponentTransform().TransformPosition(
-                FVector(Relative.X, Relative.Y, 12 + 45 * Fill)).Z / 100.0;
-            Terrain.ShowSpill(Point, Released.Volume(), Released.DominantMaterial(), FVector::ZeroVector, Floor);
-            Other->UpdatePose(Terrain);
-            return Released.Volume();
-        }
-    }
     if (XY.X > 1 && XY.Y > 1 && XY.X < Terrain.GetWorldSize() - 1 && XY.Y < Terrain.GetWorldSize() - 1)
     {
         const auto Released = Cargo.Take(Amount);
         if (Kind == EMudMachine::Dozer)
         {
-            const FVector2D Across = Horizontal(GetActorRightVector()).GetSafeNormal();
+            const FVector2D Across = Horizontal(Tool->GetRightVector()).GetSafeNormal();
             const FVector2D Forward(Across.Y, -Across.X);
-            const FVector2D Strip = XY - Forward * 0.25;
+            const FVector2D Strip = BladeHeapAnchor.IsSet()?Horizontal(BladeHeapAnchor.GetValue()):XY+Forward*.6;
             Terrain.Spread(Strip, Across, {1.76, 0.97}, Released);
             Terrain.ShowSpill(FVector(XY.X, XY.Y, Terrain.Height(XY)), Released.Volume(), Released.DominantMaterial(),
                 GetActorForwardVector(), -BIG_NUMBER, 0.45);
@@ -1023,21 +1422,25 @@ double AMudMachine::EmptyBucket(double Amount, AMudTerrain& Terrain, const TArra
 void AMudMachine::Work(double Dt, double AxisA, double AxisB, AMudTerrain& Terrain,
     const TArray<AMudMachine*>& Fleet, const MachineMotion::HydraulicInput& Direct)
 {
+    LastWorkVolume=0;
     if (RolledSide != 0)
         return;
     bBucketObstructed = false;
     const FVector PreviousTip = ToolPoint();
+    const FTransform PreviousBucketPose = Tool->GetComponentTransform();
     const double PreviousAngles[] = {Boom, Stick, Curl, Swing, BucketTilt, Bed.Angle};
     const double PreviousBlade = BladeLift + Blade;
     const TOptional<FVector> PreviousBladeHeap = BladeHeapAnchor;
     double BladeInput = 0;
-    const auto Move = [Dt](double Now, double Target, double Rate, double Response = 0.13)
+    const double DigResistance = Properties(Terrain.Surface(Horizontal(PreviousTip))).DigResistance;
+    const double HydraulicScale = 1.0 / (1.0 + MaterialMoved * DigResistance * 0.12 + Cargo.Mass() * 0.015);
+    const auto Move = [Dt, HydraulicScale](double Now, double Target, double Rate, double Response = 0.13)
     {
-        return MachineMotion::Approach(Now, Target, Rate, Dt, Response);
+        return MachineMotion::Approach(Now, Target, Rate * HydraulicScale, Dt, Response);
     };
-    const auto Valve = [Dt](double& Rate, double TargetRate)
+    const auto Valve = [Dt, HydraulicScale](double& Rate, double TargetRate)
     {
-        return MachineMotion::HydraulicTravel(Rate, TargetRate, Dt, 0.10);
+        return MachineMotion::HydraulicTravel(Rate, TargetRate * HydraulicScale, Dt, 0.10);
     };
     if (Kind == EMudMachine::Excavator)
     {
@@ -1114,17 +1517,20 @@ void AMudMachine::Work(double Dt, double AxisA, double AxisB, AMudTerrain& Terra
         const double CurlInput = FMath::Clamp(-AxisB + Direct.Curl, -1.0, 1.0);
         if (FMath::Abs(CurlInput) > 0.08)
             bUnload = false;
-        Boom = FMath::Clamp(Boom + Valve(ValveA, LiftInput * 33), LoaderRig::MinBoom, LoaderRig::MaxBoom);
+        const double PumpShare = 1.0 / FMath::Max(1.0, FMath::Abs(LiftInput) + FMath::Abs(CurlInput));
+        Boom = FMath::Clamp(Boom + Valve(ValveA, LiftInput * (LiftInput >= 0 ? 18.0 : 28.0) * PumpShare), LoaderRig::MinBoom, LoaderRig::MaxBoom);
         if (bUnload)
         {
-            ValveCurl = 0;
-            Curl = Move(Curl, LoaderRig::MinCurl, 60);
+            Curl = FMath::Max(LoaderRig::MinCurl, Curl + Valve(ValveCurl, -43 * PumpShare));
         }
         else
-            Curl = FMath::Clamp(Curl + Valve(ValveCurl, CurlInput * 48), LoaderRig::MinCurl, LoaderRig::MaxCurl);
+            Curl = FMath::Clamp(Curl + Valve(ValveCurl, CurlInput * 43 * PumpShare), LoaderRig::MinCurl, LoaderRig::MaxCurl);
+        Curl = Boom + LoaderRig::BucketPitch(Boom, Curl);
     }
     else if (Kind == EMudMachine::Dozer)
     {
+        BucketTilt=FMath::Clamp(BucketTilt+Valve(ValveTilt,Direct.Tilt*12),-DozerRig::MaxTilt,DozerRig::MaxTilt);
+        BladeYaw = FMath::Clamp(BladeYaw + FMath::Clamp(AxisB + Direct.Swing, -1.0, 1.0) * 22 * Dt, -25.0, 25.0);
         BladeInput = FMath::Clamp(AxisA + Direct.Boom, -1.0, 1.0);
         if (FMath::Abs(BladeInput) > 0.08 && (bTool || !FMath::IsNearlyEqual(BladeLift, 0.67)))
         {
@@ -1140,18 +1546,21 @@ void AMudMachine::Work(double Dt, double AxisA, double AxisB, AMudTerrain& Terra
         {
             if (!BladeDatum.IsSet())
                 BladeDatum = SampleBladeDatum(Terrain);
-            else if (Speed > 0.08)
-            {
-                const double Alpha = 1.0 - FMath::Exp(-Speed * Dt / 0.62);
-                BladeDatum = FMath::Lerp(BladeDatum.GetValue(), SampleBladeDatum(Terrain), Alpha);
-            }
-            const FVector LocalTip = BladePosition(0) + BladeLip;
-            const double NeutralZ = GetActorTransform().TransformPosition(LocalTip).Z / 100.0;
-            const double VerticalTravel = FMath::Max(0.65, GetActorUpVector().Z);
+            // Hold the surveyed grade until the operator re-engages or takes manual
+            // control. Following our own fresh cut creates a runaway deepening trench.
             const double Depth = bUnload || bGrade ? 0.075 : 0.28;
-            Target = FMath::Clamp((BladeDatum.GetValue() - NeutralZ - Depth) / VerticalTravel, -0.38, 1.05);
+            double Lower=DozerRig::MinLift,Upper=DozerRig::MaxLift;
+            for(int I=0;I<16;++I){const double Lift=(Lower+Upper)*.5;
+                const auto O=DozerRig::Origin(Lift,BladeYaw,BucketTilt),R=DozerRig::BladeRotate({BladeLip.X,BladeLip.Y,BladeLip.Z},Lift,BladeYaw,BucketTilt);
+                const double Z=GetActorTransform().TransformPosition({O.X+R.X,O.Y+R.Y,O.Z+R.Z}).Z/100;
+                if(Z<BladeDatum.GetValue()-Depth)Lower=Lift;else Upper=Lift;}
+            Target=(Lower+Upper)*.5;
         }
         BladeLift = Move(BladeLift, Target, 1.85, 0.13);
+        Blade=FMath::Clamp(BladeLift+Blade,DozerRig::MinLift,DozerRig::MaxLift)-BladeLift;
+        // A blade does not carry its wedge when the operator lifts it. Use the same
+        // finite, conserved spreading operation as explicit unloading, not a teleport.
+        if(BladeInput>.08&&BladeLift+Blade>PreviousBlade+.00001&&Cargo.Volume()>Epsilon)bUnload=true;
     }
     if (TipBed)
     {
@@ -1159,18 +1568,74 @@ void AMudMachine::Work(double Dt, double AxisA, double AxisB, AMudTerrain& Terra
             bUnload = false;
         Bed.Step(AxisA, bUnload, Dt);
     }
+    if (Kind == EMudMachine::Excavator && DigPhase == EDigPhase::Idle && Boom < PreviousAngles[0] &&
+        FMath::Abs(Stick - PreviousAngles[1]) < 0.0001 && FMath::Abs(Curl - PreviousAngles[2]) < 0.0001)
+    {
+        const FVector Candidate = BucketPoint(Boom, Stick, Curl);
+        const double ContactHeight = Terrain.Height(Horizontal(Candidate)) - 0.12;
+        if (Candidate.Z < ContactHeight)
+        {
+            Boom = FMath::Clamp(FindDigAngle(Terrain, ContactHeight), Boom, PreviousAngles[0]);
+            ValveA = 0;
+        }
+    }
+    if (Kind == EMudMachine::Loader && Boom < PreviousAngles[0])
+    {
+        const auto Penetration = [&](double Angle)
+        {
+            const FVector Edge = GetActorTransform().TransformPosition(LoaderPin(LoaderRig::CuttingEdge(Angle, Curl))) / 100;
+            return Terrain.Height(Horizontal(Edge)) - Edge.Z;
+        };
+        if (Penetration(Boom) > 0.12 && Penetration(PreviousAngles[0]) <= 0.12)
+        {
+            double Low = Boom, High = PreviousAngles[0];
+            for (int32 I = 0; I < 12; ++I)
+            {
+                const double Middle = (Low + High) * 0.5;
+                if (Penetration(Middle) > 0.12) Low = Middle; else High = Middle;
+            }
+            Boom = High; ValveA = 0;
+        }
+    }
     const double JointMotion = FMath::Abs(Boom - PreviousAngles[0]) + FMath::Abs(Stick - PreviousAngles[1]) +
         FMath::Abs(Curl - PreviousAngles[2]) + FMath::Abs(FMath::FindDeltaAngleDegrees(PreviousAngles[3], Swing)) +
         FMath::Abs(BucketTilt - PreviousAngles[4]) + FMath::Abs(Bed.Angle - PreviousAngles[5]);
     SoundHydraulic = FMath::Clamp((JointMotion / 52 + FMath::Abs(BladeLift + Blade - PreviousBlade) * 0.65) / Dt, 0.0, 1.0);
     UpdatePose(Terrain);
 
+    if (Kind == EMudMachine::Loader && JointMotion > 0.00001)
+    {
+        // Sweep the shell corners too: lowering/curling must not pass through a bed wall.
+        const FTransform Candidate = Tool->GetComponentTransform();
+        bool Blocked = false;
+        for (auto* Receiver : Fleet)
+        {
+            if (Receiver == this || !Receiver->TipBed) continue;
+            for (const double Side : {-145.0, 145.0})
+                for (std::size_t I = 0; I < LoaderRig::BucketProfile.size(); ++I)
+                {
+                    const auto P = LoaderRig::OuterBucketPoint(I);
+                    const FVector Local(P.X, Side, P.Z);
+                    const FVector From = PreviousBucketPose.TransformPosition(Local) / 100;
+                    FVector To = Candidate.TransformPosition(Local) / 100, Velocity = To - From;
+                    Load NoMass;
+                    Blocked |= Receiver->InterceptMaterial(From, To, Velocity, NoMass, false);
+                }
+        }
+        if (Blocked)
+        {
+            Boom = PreviousAngles[0]; Curl = PreviousAngles[2]; ValveA = ValveCurl = 0;
+            bBucketObstructed = true; UpdatePose(Terrain);
+        }
+    }
     const FVector Point = ToolPoint();
     const FVector2D XY = Horizontal(Point);
+    const FVector PreviousContact = LastToolContact.Get(PreviousTip);
+    LastToolContact = Point;
     const double Ground = Terrain.Height(XY);
     double Clearance = Kind == EMudMachine::Dozer ? BladeClearance(Terrain, BladeLift + Blade) : Point.Z - Ground;
     const USceneComponent* Bucket = Kind == EMudMachine::Loader ? Tool.Get() : BucketTiltPivot.Get();
-    const double BucketHalfEdge = Kind == EMudMachine::Loader ? 126 : BucketOuterToothCm;
+    const double BucketHalfEdge = Kind == EMudMachine::Loader ? 141 : BucketOuterToothCm;
     if (Bucket)
     {
         const FVector Lip = Kind == EMudMachine::Loader ? LoaderPin(LoaderRig::Lip) : BucketLip;
@@ -1213,8 +1678,8 @@ void AMudMachine::Work(double Dt, double AxisA, double AxisB, AMudTerrain& Terra
             {
                 bTool = false;
                 BladeDatum.Reset();
-                BladeLift += Blade;
-                Blade = 0;
+                Blade=BladeLift+Blade-.67;
+                BladeLift=.67;
             }
         }
     }
@@ -1236,45 +1701,76 @@ void AMudMachine::Work(double Dt, double AxisA, double AxisB, AMudTerrain& Terra
         }
         else if (DigPhase != EDigPhase::Lift && FMath::Abs(Speed) < 0.35 && !bUnload)
         {
-            const FVector2D Forward = Horizontal(Turret->GetForwardVector()).GetSafeNormal();
-            const FVector2D Across(-Forward.Y, Forward.X);
-            const double Pull = FVector2D::DotProduct(Horizontal(PreviousTip - Point), Forward);
-            if (Pull > 0 && (bBucketGround || DigPhase == EDigPhase::Scoop))
+            const bool bDrawingStick = Stick < PreviousAngles[1] - 0.0001;
+            const bool bClosingBucket = Curl > PreviousAngles[2] + 0.0001;
+            const bool bOpeningBucket = Curl < PreviousAngles[2] - 0.0001;
+            const FTransform& BucketPose = BucketTiltPivot->GetComponentTransform();
+            // The mouth normal points out between the cutting edge and the upper rim.
+            const FVector MouthOut = BucketPose.TransformVectorNoScale(
+                FVector(BucketLip.Z - BucketCrownCm, 0, BucketRearCm - BucketLip.X)).GetSafeNormal();
+            // Compare at the same boom, turret and chassis pose to exclude their motion from intake.
+            const FVector JointStart = BucketPoint(Boom, PreviousAngles[1], PreviousAngles[2]);
+            const double IntakeTravel = FMath::Max(0.0, FMath::Min(
+                FVector::DotProduct(Point - JointStart, MouthOut), FVector::DotProduct(Point - PreviousTip, MouthOut)));
+            if ((bDrawingStick || bClosingBucket) && !bOpeningBucket && IntakeTravel > Epsilon && bBucketGround)
             {
-                const double Amount = FMath::Min(FMath::Min(Dt * 4.5, Pull * 2.35), Capacity() - Cargo.Volume());
                 const double Floor = DigPhase == EDigPhase::Scoop ? FMath::Max(Point.Z, DigSurface - 0.77) : Point.Z;
-                const FVector Lateral = BucketTiltPivot->GetRightVector();
-                const double AcrossSlope = Lateral.Z / FMath::Max(0.5, FVector2D::DotProduct(Horizontal(Lateral), Across));
-                // The terrain grid needs a margin on each side of the actual cutting edge.
-                const double CutHalfWidth = BucketHalfWidthCm / 100 + 0.50;
-                const Load Cut = Terrain.CutPass(XY - Forward * 0.22, Across, FVector2D(CutHalfWidth, 1.30),
-                    Amount, Floor - 0.07, {AcrossSlope, 0});
+                const FVector Lateral = BucketPose.GetUnitAxis(EAxis::Y);
+                const FVector2D Across = Horizontal(Lateral).GetSafeNormal();
+                const FVector2D Forward(Across.Y, -Across.X);
+                const double AcrossSlope = Lateral.Z / FMath::Max(0.5, Horizontal(Lateral).Size());
+                double BiteDepth = 0;
+                constexpr int32 ToothSamples = 7;
+                for (int32 Tooth = 0; Tooth < ToothSamples; ++Tooth)
+                {
+                    const double Side = FMath::Lerp(-BucketOuterToothCm, BucketOuterToothCm, double(Tooth) / (ToothSamples - 1));
+                    const FVector Tip = BucketPose.TransformPosition(BucketLip + FVector(0, Side, 0)) / 100.0;
+                    BiteDepth += FMath::Clamp(Terrain.Height(Horizontal(Tip)) - Tip.Z + 0.02, 0.0, 0.45) / ToothSamples;
+                }
+                const double SweptVolume = (2 * BucketHalfWidthCm / 100) * BiteDepth * IntakeTravel;
+                const double Amount = FMath::Min3(Dt * 3.2, SweptVolume, Capacity() - Cargo.Volume());
+                // A short footprint keeps the cut at the teeth while accommodating the metre terrain grid.
+                const Load Cut = Terrain.CutPass(XY, Across, FVector2D(BucketHalfWidthCm / 100 + 0.25, 0.60),
+                    Amount, Floor, {AcrossSlope, 0}, true);
                 Moved = Cut.Volume();
                 Cargo.Receive(Cut);
                 SpillVolume = Moved;
                 WorkedMaterial = Cut.DominantMaterial();
-                SpillDirection = -Turret->GetForwardVector();
+                SpillDirection = FVector(-Forward.X, -Forward.Y, 0);
             }
             if (DigPhase == EDigPhase::Scoop && (DigTime >= 1.55 || Cargo.Volume() >= Capacity() - 0.01))
                 DigPhase = EDigPhase::Lift;
         }
     }
-    else if (Kind == EMudMachine::Loader && bBucketGround && Speed > 0.08 && Curl >= -20 && Curl <= 12)
+    else if (Kind == EMudMachine::Loader && bBucketGround && Speed > 0.08 && Curl >= -20 && Curl <= 12 &&
+        FVector2D::Distance(XY, Horizontal(PreviousContact)) > 0.0001)
     {
         const FVector Lateral = Tool->GetRightVector();
         const FVector2D Across = Horizontal(Lateral).GetSafeNormal();
         const double AcrossSlope = Lateral.Z / FMath::Max(0.5, Horizontal(Lateral).Size());
-        const double Amount = FMath::Min(Dt * FMath::Min(4.2, Speed * 3.0), Capacity() - Cargo.Volume());
-        const Load Cut = Terrain.CutPass(XY, Across, FVector2D(1.26, 0.95), Amount, Point.Z - 0.035, {AcrossSlope, 0});
-        Cargo.Receive(Cut);
-        SpillVolume = Moved = Cut.Volume();
-        WorkedMaterial = Cut.DominantMaterial();
+        const double Free = FMath::Max(0.0, Capacity() - Cargo.Volume());
+        const double Amount = Dt * FMath::Min(4.2, Speed * 3.0);
+        Load Cut = Terrain.SweepCut(PreviousContact - FVector(0, 0, 0.035), Point - FVector(0, 0, 0.035),
+            Across, FVector2D(1.41, 0.50), Amount, {AcrossSlope, 0});
+        const double Displaced = Cut.Volume();
+        const Material CutMaterial = Cut.DominantMaterial();
+        Cargo.Receive(Cut.Take(Free));
+        if (Cut.Volume() > Epsilon)
+        {
+            const Load Left = Cut.Take(Cut.Volume() * 0.5);
+            Terrain.Deposit(XY - Across * 1.65, 0.55, Left);
+            Terrain.Deposit(XY + Across * 1.65, 0.55, Cut);
+        }
+        SpillVolume = Moved = Displaced;
+        WorkedMaterial = CutMaterial;
     }
     else if (Kind == EMudMachine::Dozer)
     {
-        const FVector2D Across = Horizontal(GetActorRightVector()).GetSafeNormal();
+        const FTransform PreviousPose=LastBladePose.Get(Tool->GetComponentTransform());
+        LastBladePose=Tool->GetComponentTransform();
+        const FVector2D Across = Horizontal(Tool->GetRightVector()).GetSafeNormal();
         const FVector2D Forward(Across.Y, -Across.X);
-        if (Cargo.Volume() > Epsilon && (Speed < -0.12 || (BladeInput > 0.08 && Clearance > 0.20)))
+        if (Cargo.Volume() > Epsilon && (Speed < -0.12 || Clearance > 0.20))
         {
             const FVector2D Heap = PreviousBladeHeap.IsSet()
                 ? Horizontal(PreviousBladeHeap.GetValue()) : Horizontal(PreviousTip) + Forward * 0.61;
@@ -1286,30 +1782,45 @@ void AMudMachine::Work(double Dt, double AxisA, double AxisB, AMudTerrain& Terra
                 GetActorForwardVector(), -BIG_NUMBER, 0.42);
             Moved = Released.Volume();
         }
-        else if (bBucketGround && Speed > 0.08)
+        else if (bBucketGround && Speed > 0.08 && FVector2D::Distance(XY, Horizontal(PreviousContact)) > 0.0001)
         {
-            BladeFlowTravel += Speed * Dt;
-            constexpr double BehindEdge = 0.26;
-            const FVector2D PassCenter = XY - Forward * BehindEdge;
-            const FVector Up = GetActorUpVector();
+            BladeFlowTravel += Speed * Dt * (1.0 - Terrain.Wetness(XY) * 0.32);
+            const FVector Up = Tool->GetUpVector();
             const FVector2D Gradient = -Horizontal(Up) / FMath::Max(0.65, Up.Z);
             const FVector2D Slopes(FVector2D::DotProduct(Gradient, Across), FVector2D::DotProduct(Gradient, Forward));
-            const double CutPlane = Point.Z - BehindEdge * Slopes.Y - 0.04;
-            if (bGrade)
-                Moved = Terrain.Grade(PassCenter, Across, {1.76, 1.08}, Speed * 1.8 * Dt, CutPlane, Slopes);
-            else
+            Load Cut;
+            constexpr int Strips=12;
+            const double Amount=Dt*FMath::Min(5.,Speed*3.8);
+            if(bGrade)
             {
-                const double Amount = Dt * FMath::Min(5.0, Speed * 3.8);
-                Load Cut = Terrain.CutPass(PassCenter, Across, {1.76, 0.88}, Amount, CutPlane, Slopes, true);
+                TArray<FVector> Edge;
+                for(int I=0;I<=Strips;++I)
+                {
+                    const auto E=DozerRig::Edge(FMath::Lerp(-DozerRig::HalfBlade,DozerRig::HalfBlade,I/double(Strips)));
+                    Edge.Add(Tool->GetComponentTransform().TransformPosition(FVector(E.X,E.Y,E.Z))/100);
+                }
+                Moved=Terrain.Grade(XY,Across,{1.72,.9},Speed*1.8*Dt,Point.Z-.035,Slopes,&Edge);
+            }
+            else for(int I=0;I<Strips;++I)
+            {
+                const double Side=FMath::Lerp(-DozerRig::HalfBlade,DozerRig::HalfBlade,(I+.5)/Strips);
+                const auto E=DozerRig::Edge(Side);
+                const FVector Local(E.X,E.Y,E.Z);
+                const FVector To=Tool->GetComponentTransform().TransformPosition(Local)/100-FVector(0,0,.035);
+                const FVector From=PreviousPose.TransformPosition(Local)/100-FVector(0,0,.035);
+                const FVector2D Reach(3.44/Strips*.5+.025,.45);
+                Cut.Receive(Terrain.SweepCut(From,To,Across,Reach,Amount/Strips,Slopes));
+            }
+            if(!bGrade)
+            {
                 Moved = Cut.Volume();
                 WorkedMaterial = Cut.DominantMaterial();
                 const Load Held = Cut.Take(Capacity() - Cargo.Volume());
                 Cargo.Receive(Held);
-                SpillVolume = Held.Volume();
                 if (Cut.Volume() > Epsilon)
                 {
                     // Material spills to both sides. Turning and crossfall move the larger share to one wing.
-                    const double RightShare = FMath::Clamp(0.57 - Slopes.X * 0.6 - SteeringCommand * 0.28, 0.16, 0.84);
+                    const double RightShare = FMath::Clamp(0.57 - Slopes.X * 0.6 - SteeringCommand * 0.28 + BladeYaw / 50.0, 0.10, 0.90);
                     const Load RightLoad = Cut.Take(Cut.Volume() * RightShare);
                     for (const double Side : {-1.0, 1.0})
                     {
@@ -1317,17 +1828,30 @@ void AMudMachine::Work(double Dt, double AxisA, double AxisB, AMudTerrain& Terra
                         const FVector2D Wing = XY + Across * (Side * 1.68);
                         const FVector2D SidePile = Wing - Forward * 0.52 + Across * (Side * 0.77);
                         Terrain.Spread(SidePile, Across, {0.96, 1.32}, Spill);
-                        Terrain.ShowSpill(FVector(Wing.X, Wing.Y, Terrain.MeshHeight(Wing) + 0.08), Spill.Volume(),
+                        Terrain.ShowSpill(FVector(Wing.X, Wing.Y, Terrain.MeshHeight(Wing) + 0.04), Spill.Volume(),
                             Spill.DominantMaterial(), GetActorRightVector() * Side - GetActorForwardVector() * 0.28,
-                            -BIG_NUMBER, 0.53);
+                            -BIG_NUMBER, 0.38);
                     }
                 }
             }
         }
     }
+    if (Kind == EMudMachine::Dozer && bBucketGround && Speed > 0.08 && Cargo.Volume() > Epsilon)
+    {
+        const FVector2D Across = Horizontal(Tool->GetRightVector()).GetSafeNormal();
+        const double Rate = Cargo.Volume() * (FMath::Abs(BladeYaw) / 25.0 * 0.38 +
+            FMath::Abs(BucketTilt)/DozerRig::MaxTilt*.16+
+            FMath::Max(0.0, Cargo.Volume() / Capacity() - 0.35) * 0.22);
+        Load SideFlow = Cargo.Take(Rate * Dt);
+        const double RightFraction=FMath::Clamp(.5+BladeYaw/25.0*.45+BucketTilt/DozerRig::MaxTilt*.12,.05,.95);
+        const Load RightFlow=SideFlow.Take(SideFlow.Volume()*RightFraction);
+        Terrain.Spread(XY+Across*2.25,Across,{.85,1.15},RightFlow);
+        Terrain.Spread(XY-Across*2.25,Across,{.85,1.15},SideFlow);
+    }
     if (SpillVolume > Epsilon)
         Terrain.ShowSpill(FVector(Point.X, Point.Y, FMath::Max(Ground, Point.Z)), SpillVolume,
-            WorkedMaterial, SpillDirection, -BIG_NUMBER, Kind == EMudMachine::Dozer ? 0.48 : 1.0);
+            WorkedMaterial, SpillDirection);
+    LastWorkVolume=Moved;
     MaterialMoved = FMath::Max(Moved / Dt, MaterialMoved - 5 * Dt);
     if (Moved > Epsilon)
         RecordEarthSound(Moved / Dt, WorkedMaterial);
@@ -1373,34 +1897,67 @@ void AMudMachine::UpdateBladeHeap(const AMudTerrain& Terrain, double Fraction)
     }
 
     const double Spread = FMath::Sqrt(Fraction);
-    const double Length = FMath::Lerp(0.55, 2.35, Spread);
-    const double Width = FMath::Lerp(0.87, 3.18, Spread);
-    const double Relief = FMath::Lerp(0.13, 1.45, Fraction);
-    const FRotator Rotation(0, Heading, 0);
+    const FVector2D Tip = Horizontal(ToolPoint());
+    const double Wet = Terrain.Wetness(Tip);
+    const double Length = FMath::Lerp(0.48, 2.31, Spread) * (1.0 - Wet * 0.15);
+    const double Width = FMath::Lerp(0.83, 3.32, Spread);
+    const double Relief = FMath::Lerp(0.10, 1.08, Spread) * (1.0 + Wet * 0.12);
+    const FRotator Rotation(0, Heading+BladeYaw, 0);
     const FVector2D Forward = Horizontal(Rotation.Vector());
     const FVector2D Across(-Forward.Y, Forward.X);
-    const FVector2D XY = Horizontal(ToolPoint()) + Forward * (Length * 0.5 - 0.04);
+    const FVector2D XY = Tip + Forward * (Length * 0.5 - 0.14);
     const FVector Anchor(XY.X, XY.Y, Terrain.MeshHeight(XY));
-    if (BladeHeapAnchor.IsSet() && FVector::DistSquared(Anchor, BladeHeapAnchor.GetValue()) < FMath::Square(0.075) &&
-        FMath::Abs(FMath::FindDeltaAngleDegrees(BladeHeapHeading, Heading)) < 2.0 &&
-        FMath::Abs(BladeFlowTravel - RenderedBladeTravel) < 0.075 &&
-        FMath::Abs(Fraction - BladeHeapFraction) < 0.015)
+    // The bank follows the cutting edge every pose. Rebuild the ground contact only after visible movement.
+    Payload->SetWorldLocationAndRotation(Anchor * 100, Rotation);
+    if (BladeHeapAnchor.IsSet() && FVector::DistSquared(Anchor, BladeHeapAnchor.GetValue()) < FMath::Square(0.035) &&
+        FMath::Abs(FMath::FindDeltaAngleDegrees(BladeHeapHeading, Heading+BladeYaw)) < 1.1 &&
+        FMath::Abs(BladeFlowTravel - RenderedBladeTravel) < 0.035 &&
+        FMath::Abs(Fraction - BladeHeapFraction) < 0.009)
         return;
     BladeHeapAnchor = Anchor;
-    BladeHeapHeading = Heading;
+    BladeHeapHeading = Heading+BladeYaw;
     BladeHeapFraction = Fraction;
     RenderedBladeTravel = BladeFlowTravel;
 
+    const double Flow = BladeFlowTravel;
     TArray<FVector> Vertices, Normals;
-    Vertices.Reserve(BladeHeapShape.Num());
-    Normals.Reserve(BladeHeapShape.Num());
-    for (const FVector& Base : BladeHeapShape)
+    TArray<FVector2D> UV;
+    constexpr int32 Count = BladeHeapRows * BladeHeapColumns;
+    Vertices.Reserve(Count);
+    Normals.Reserve(Count);
+    UV.Reserve(Count);
+    const auto OutsideBlade=[&](FVector Local)
     {
-        const double X = Base.X * Length, Y = Base.Y * Width;
-        const double Ground = Terrain.MeshHeight(XY + Forward * (X / 100.0) + Across * (Y / 100.0));
-        const double Fold = FMath::PerlinNoise2D(FVector2D(X * 0.041 - BladeFlowTravel * 5.0, Y * 0.036));
-        const double Height = Base.Z * (Relief + Fold * Spread * 0.27);
-        Vertices.Emplace(X, Y, (Ground - Anchor.Z) * 100 + Height - 4.0);
+        FVector World=Payload->GetComponentTransform().TransformPosition(Local);
+        FVector BladeLocal=Tool->GetComponentTransform().InverseTransformPosition(World);
+        if(FMath::Abs(BladeLocal.Y)<DozerRig::HalfBlade&&BladeLocal.Z>=DozerRig::Profile.front().Z&&BladeLocal.Z<=DozerRig::Profile.back().Z)
+        {
+            BladeLocal.X=FMath::Max(BladeLocal.X,DozerRig::FaceX(BladeLocal.Z,BladeLocal.Y)+4.0);
+            World=Tool->GetComponentTransform().TransformPosition(BladeLocal);
+            World.Z=FMath::Max(World.Z,Terrain.Height({World.X/100,World.Y/100})*100-2);
+        }
+        return Payload->GetComponentTransform().InverseTransformPosition(World);
+    };
+    for (int32 Row = 0; Row < BladeHeapRows; ++Row)
+    {
+        const double V = static_cast<double>(Row) / (BladeHeapRows - 1);
+        const double Side = V * 2.0 - 1.0;
+        const double Y = Side * Width * 0.5;
+        for (int32 Column = 0; Column < BladeHeapColumns; ++Column)
+        {
+            const double U = static_cast<double>(Column) / (BladeHeapColumns - 1);
+            const double X = (U - 0.5) * Length + BladeWingOffset(Y * 100.0) * 0.01 * (1.0 - U);
+            const double Ground = Terrain.MeshHeight(XY + Forward * X + Across * Y);
+            const double Shoulder = 1.0 - FMath::SmoothStep(0.37, 1.0 - U * 0.16, FMath::Abs(Side));
+            const double Crest = FMath::Lerp(0.75, 1.0, FMath::SmoothStep(0.0, 0.23, U))
+                * (1.0 - FMath::SmoothStep(0.23, 1.0 - Side * Side * 0.20, U));
+            const double MovingX = X - Flow * 0.56;
+            const double Fold = FMath::PerlinNoise2D(FVector2D(MovingX * 1.8, Y * 1.6 + 1.2));
+            const double Ripples = FMath::PerlinNoise2D(FVector2D(MovingX * 3.6, Y * 3.1 - 4.1));
+            const double Height = Relief * Shoulder * Crest * (0.94 + Fold * 0.15 + Ripples * 0.045);
+            Vertices.Add(OutsideBlade({X*100,Y*100,(Ground-Anchor.Z+Height)*100-2}));
+            UV.Emplace(MovingX * 0.65, Y * 0.65);
+        }
     }
     for (int32 Y = 0; Y < BladeHeapRows; ++Y)
     {
@@ -1414,8 +1971,33 @@ void AMudMachine::UpdateBladeHeap(const AMudTerrain& Terrain, double Fraction)
             Normals.Add(FVector::CrossProduct(Along, Lateral).GetSafeNormal());
         }
     }
-    Payload->SetWorldLocationAndRotation(Anchor * 100, Rotation);
-    Payload->UpdateMeshSection_LinearColor(0, Vertices, Normals, {}, {}, {}, {}, {}, {}, false);
+    Payload->UpdateMeshSection_LinearColor(0, Vertices, Normals, UV, {}, {}, {}, {}, {}, false);
+    if (!BladeClods)
+        return;
+
+    // Surface pieces climb at the blade, roll over the crest and fan out towards the ground.
+    TArray<FTransform, TInlineAllocator<BladeClodCount>> Pieces;
+    for (int32 I = 0; I < BladeClodCount; ++I)
+    {
+        const double Seed = (I * 7 % BladeClodCount + 0.5) / BladeClodCount;
+        const double U = FMath::Fmod(Seed + Flow * (0.38 + 0.035 * (I % 4)), 1.0);
+        const double Lane = (I * 11 % BladeClodCount + 0.5) / BladeClodCount - 0.5;
+        const double V = 0.5 + Lane * (0.68 + U * 0.68);
+        const double GridX = U * (BladeHeapColumns - 1), GridY = V * (BladeHeapRows - 1);
+        const int32 X = FMath::Clamp(FMath::FloorToInt(GridX), 0, BladeHeapColumns - 2);
+        const int32 Y = FMath::Clamp(FMath::FloorToInt(GridY), 0, BladeHeapRows - 2);
+        const int32 Index = Y * BladeHeapColumns + X;
+        const FVector Surface = FMath::Lerp(
+            FMath::Lerp(Vertices[Index], Vertices[Index + 1], GridX - X),
+            FMath::Lerp(Vertices[Index + BladeHeapColumns], Vertices[Index + BladeHeapColumns + 1], GridX - X),
+            FMath::Clamp(GridY - Y, 0.0, 1.0));
+        const double Envelope = FMath::SmoothStep(0.02, 0.14, U) * (1.0 - FMath::SmoothStep(0.75, 0.99, U))
+            * (1.0 - FMath::SmoothStep(0.27, 0.48, FMath::Abs(V - 0.5)));
+        const double Size = FMath::Max(0.001, (0.035 + (I % 5) * 0.012) * FMath::Sqrt(Spread) * Envelope);
+        const double Roll = FMath::Fmod(Flow * (186.0 + 12.0 * I) + I * 93.0, 360.0);
+        Pieces.Emplace(FRotator(-Roll, I * 29.0, Lane * 36.0), Surface + FVector(0, 0, Size * 12.0), FVector(Size));
+    }
+    BladeClods->BatchUpdateInstancesTransforms(0, MakeArrayView(Pieces.GetData(), Pieces.Num()), false, true, true);
 }
 
 void AMudMachine::UpdatePose(const AMudTerrain& Terrain)
@@ -1430,25 +2012,71 @@ void AMudMachine::UpdatePose(const AMudTerrain& Terrain)
     const FVector2D RearAxle = RearFrame ? RearFramePoint(Position, Heading, Articulation, RearFrameAxle)
         : Position - Forward * RearSupport;
     const bool bTracked = Kind == EMudMachine::Dozer || Kind == EMudMachine::Excavator;
-    const double LoadFraction = Cargo.Volume() / Capacity();
+    const double LoadFraction = Kind==EMudMachine::Dozer?0:Cargo.Volume() / Capacity();
     const FVector2D RearForward = Horizontal(FRotator(0, Heading + Articulation, 0).Vector());
     const FVector2D RearRight(-RearForward.Y, RearForward.X);
-    const auto SinkAt = [&](FVector2D Axle, FVector2D Lateral)
+    double SupportSink[4]{};
+    int32 SupportCount[4]{};
+    for (const auto& Wheel : Wheels)
     {
-        return Terrain.ContactSink(Axle + Lateral * 1.1, bTracked, LoadFraction);
+        if (!Wheel.Soil.Initialized)
+            continue;
+        const bool bRear = Wheel.bOnRearFrame || Wheel.Hub->GetRelativeLocation().X < 0;
+        const int32 Group = (bRear ? 2 : 0) + (Wheel.LateralM > 0 ? 1 : 0);
+        SupportSink[Group] += Wheel.Soil.Sink;
+        ++SupportCount[Group];
+    }
+    for (const auto& Track : Tracks)
+    {
+        if (!Track.Soil.Initialized)
+            continue;
+        const int32 Side = Track.LateralM > 0 ? 1 : 0;
+        SupportSink[Side] = SupportSink[Side + 2] = Track.Soil.Sink;
+        SupportCount[Side] = SupportCount[Side + 2] = 1;
+    }
+    const auto SinkAt = [&](FVector2D Axle, FVector2D Lateral, int32 Group)
+    {
+        return SupportCount[Group] > 0 ? SupportSink[Group] / SupportCount[Group] :
+            Terrain.ContactSink(Axle + Lateral * 1.1, bTracked, LoadFraction);
     };
-    const double FrontLeft = SinkAt(FrontAxle, -Right), FrontRight = SinkAt(FrontAxle, Right);
-    const double RearLeft = SinkAt(RearAxle, -RearRight), RearRightSink = SinkAt(RearAxle, RearRight);
+    const double FrontLeft = SinkAt(FrontAxle, -Right, 0), FrontRight = SinkAt(FrontAxle, Right, 1);
+    const double RearLeft = SinkAt(RearAxle, -RearRight, 2), RearRightSink = SinkAt(RearAxle, RearRight, 3);
     const double FrontSink = (FrontLeft + FrontRight) * 0.5, RearSink = (RearLeft + RearRightSink) * 0.5;
-    const double Front = Terrain.Height(FrontAxle) - FrontSink;
-    const double Back = Terrain.Height(RearAxle) - RearSink;
+    const auto AxleHeight = [&](FVector2D Axle, FVector2D Lateral)
+    {
+        const double Center = Terrain.Height(Axle);
+        if (bTracked)
+            return Center;
+        const double Gauge=Wheels.IsEmpty()?1.1:FMath::Abs(Wheels[0].LateralM);
+        return (Terrain.Height(Axle-Lateral*Gauge)+Terrain.Height(Axle+Lateral*Gauge))*.5;
+    };
+    const double Front = AxleHeight(FrontAxle, Right) - FrontSink;
+    const double Back = AxleHeight(RearAxle, RearRight) - RearSink;
     const double Left = Terrain.Height(Position - Right * 1.1) - (FrontLeft + RearLeft) * 0.5;
     const double RightHeight = Terrain.Height(Position + Right * 1.1) - (FrontRight + RearRightSink) * 0.5;
-    const double Pitch = FMath::RadiansToDegrees(FMath::Atan2(Front - Back, FVector2D::Distance(FrontAxle, RearAxle)));
-    const double Roll = RolledSide != 0 ? RolledSide * 78.0 :
+    double Pitch = FMath::RadiansToDegrees(FMath::Atan2(Front - Back, FVector2D::Distance(FrontAxle, RearAxle)));
+    double Roll = RolledSide != 0 ? RolledSide * 78.0 :
         FMath::RadiansToDegrees(FMath::Atan2(Left - RightHeight, 2.2));
-    const double Z = (Terrain.Height(Position) - (FrontSink + RearSink) * 0.5) * 0.5 +
+    double Z = (Terrain.Height(Position) - (FrontSink + RearSink) * 0.5) * 0.5 +
         (Front + Back + Left + RightHeight) * 0.125;
+    if(!bTracked)
+    {
+        const double RearRun=FMath::Max(.5,FVector2D::DotProduct(Position-RearAxle,Forward));
+        Z=(Front*RearRun+Back*FrontSupport)/(RearRun+FrontSupport);
+    }
+    if(bTracked)
+    {
+        const double Gauge=Tracks.IsEmpty()?1.1:FMath::Abs(Tracks[0].LateralM);
+        const auto Support=TrackGround::Fit([&](double X,double Y)
+        {
+            const double Sink=FMath::Lerp((FrontLeft+RearLeft)*.5,(FrontRight+RearRightSink)*.5,
+                FMath::Clamp((Y/Gauge+1)*.5,0.,1.));
+            return Terrain.Height(Position+Forward*X+Right*Y)-Sink;
+        },Kind==EMudMachine::Dozer?DozerTrackHalfContact:BeltPath.HalfStraight,
+            Kind==EMudMachine::Dozer?DozerTrackRadius:BeltPath.Radius,Gauge,.305);
+        Z=Support.Height;Pitch=FMath::RadiansToDegrees(FMath::Atan(Support.Pitch));
+        if(RolledSide==0)Roll=-FMath::RadiansToDegrees(FMath::Atan(Support.Crossfall));
+    }
     SetActorLocationAndRotation(FVector(Position.X * 100, Position.Y * 100, Z * 100 + (RolledSide != 0 ? 115 : 0)),
         FRotator(Pitch, Heading, Roll));
     if (RearFrame)
@@ -1469,15 +2097,20 @@ void AMudMachine::UpdatePose(const AMudTerrain& Terrain)
     }
     if (Kind == EMudMachine::Dozer)
     {
+        Blade=FMath::Clamp(BladeLift+Blade,DozerRig::MinLift,DozerRig::MaxLift)-BladeLift;
         const FVector BladeLocation = BladePosition(BladeLift + Blade);
-        Tool->SetRelativeLocation(BladeLocation);
+        BladeYaw=FMath::Clamp(BladeYaw,-DozerRig::MaxYaw,DozerRig::MaxYaw);
+        BucketTilt=FMath::Clamp(BucketTilt,-DozerRig::MaxTilt,DozerRig::MaxTilt);
+        const FRotator Orientation(0,0,BucketTilt);
+        Tool->SetRelativeLocationAndRotation(-Orientation.RotateVector(DozerBladePin),Orientation);
         const FVector Along = BladeLocation + DozerBladePin - DozerPushPivot;
         DozerPushArms->SetRelativeRotation(FRotator(FMath::RadiansToDegrees(FMath::Atan2(Along.Z, Along.X)), 0, 0));
+        DozerYawCarrier->SetRelativeLocationAndRotation({DozerPushLength,0,0},FRotator(0,BladeYaw,0));
     }
     if (Kind == EMudMachine::Loader)
     {
         BoomPivot->SetRelativeRotation(FRotator(Boom, 0, 0));
-        Tool->SetRelativeRotation(FRotator(Curl - Boom, 0, 0));
+        Tool->SetRelativeRotation(FRotator(LoaderRig::BucketPitch(Boom, Curl), 0, 0));
         UpdateLoaderLinkage();
     }
     if (TipBed)
@@ -1507,38 +2140,51 @@ void AMudMachine::UpdatePose(const AMudTerrain& Terrain)
         const double RodDiameter = Link.DiameterM * 0.56;
         Link.Rod->SetRelativeScale3D({RodDiameter, RodDiameter, (Length - RodOffset) / 100.0});
     }
-    Payload->SetVisibility(Cargo.Volume() > 0.02);
+    UMeshComponent* Surface = CargoSurface ? static_cast<UMeshComponent*>(CargoSurface) : Payload.Get();
+    Surface->SetVisibility(Cargo.Volume() > 0.02, true);
     const double Fraction = FMath::Clamp(Cargo.Volume() / Capacity(), 0.0, 1.0);
     if (Cargo.Volume() > Epsilon && CargoVisual != Cargo.DominantMaterial())
     {
         CargoVisual = Cargo.DominantMaterial();
-        Payload->SetMaterial(0, PaintMaterial(CargoPaint[static_cast<uint8>(CargoVisual)]));
+        const auto Index = static_cast<uint8>(CargoVisual);
+        Surface->SetMaterial(0, PaintMaterial(CargoSurface ? SurfacePaint[Index] : CargoPaint[Index]));
+        if (BladeClods)
+            BladeClods->SetMaterial(0, Surface->GetMaterial(0));
     }
     if (TipBed)
     {
         const bool bTruck = Kind == EMudMachine::Truck;
-        Payload->SetRelativeScale3D(FVector(bTruck ? 4.68 : 3.60, bTruck ? 2.24 : 2.10,
-            FMath::Lerp(0.05, bTruck ? 1.66 : 1.42, Fraction)));
+        const double Span = FMath::Lerp(0.44, 1.0, FMath::Pow(Fraction, 0.45));
+        Surface->SetRelativeScale3D(FVector((bTruck ? 4.68 : 3.60) * Span, (bTruck ? 2.24 : 2.10) * Span,
+            FMath::Lerp(0.06, bTruck ? 1.66 : 1.42, FMath::Pow(Fraction, 0.8))));
     }
     if (Kind == EMudMachine::Excavator || Kind == EMudMachine::Loader)
     {
-        const FVector Span = Kind == EMudMachine::Loader ? FVector(0.85, 2.15, 0.72) :
+        const FVector Span = Kind == EMudMachine::Loader ? FVector(1.00, 2.65, 0.92) :
             ExcavatorPayloadSize;
-        Payload->SetRelativeScale3D(Span * FVector(1, 1, FMath::Lerp(0.08, 1.0, Fraction)));
+        const double Footprint = FMath::Lerp(0.45, 1.0, FMath::Pow(Fraction, 0.45));
+        Surface->SetRelativeScale3D(Span * FVector(Footprint, Footprint, FMath::Lerp(0.08, 1.0, FMath::Pow(Fraction, 0.8))));
     }
     if (Kind == EMudMachine::Dozer)
         UpdateBladeHeap(Terrain, Fraction);
+    else
+        UpdateCargoGrains(*Surface, Fraction);
+    for(auto& Track:Tracks)UpdateTrack(Track,&Terrain);
 }
 
 FString AMudMachine::ToolDescription() const
 {
     if (RolledSide != 0)
         return TEXT("Rolled over | Backspace to recover");
-    if (Grip < 0.18 && Cargo.Volume() > Capacity() * 0.5)
-        return TEXT("Bogged down | Tip load or recover");
+    if (bBogged)
+        return TEXT("Bogged down | Ease off, then rock forwards / backwards");
+    if (FMath::Abs(Drivetrain.WheelSpeed - Speed) > 1.2 && FMath::Abs(DriveCommand) > 0.35)
+        return TEXT("Wheelspin | Reduce throttle to regain grip");
     switch (Kind)
     {
     case EMudMachine::Dozer:
+        if(DraftForceKN>Spec(Kind).Mass*4. && FMath::Abs(Speed)<.08 && DriveCommand>.5)
+            return FString::Printf(TEXT("Draft %.0f kN | Raise blade for a shallower cut"),DraftForceKN);
         if (bUnload)
             return TEXT("Spreading the load");
         if (!IsBladeWorking())
@@ -1546,7 +2192,7 @@ FString AMudMachine::ToolDescription() const
         if (!bBucketGround)
             return TEXT("Down arrow | Lower blade");
         if (!bGrade && Cargo.Volume() >= Capacity() - 0.01)
-            return TEXT("Full blade | spilling right | I to spread");
+            return TEXT("Full blade | spilling at wings | I to spread");
         return IsMovingEarth() ? (bGrade ? TEXT("Grading the surface") : TEXT("Pushing soil")) :
             (bGrade ? TEXT("Blade down | W to grade") : TEXT("Blade down | W to cut"));
     case EMudMachine::Excavator:
@@ -1566,6 +2212,8 @@ FString AMudMachine::ToolDescription() const
             return TEXT("Ground out of reach | reposition and press V");
         if (FMath::Abs(Speed) >= 0.35)
             return TEXT("Stop the tracks to dig");
+        if (bBucketGround)
+            return TEXT("Draw the stick in and curl the bucket to collect soil");
         return TEXT("J/N boom | Shift+K/M bucket");
     case EMudMachine::Loader:
         if (bBucketObstructed)

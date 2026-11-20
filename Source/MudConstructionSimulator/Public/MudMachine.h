@@ -5,6 +5,8 @@
 #include "Misc/Optional.h"
 #include "Earthwork.h"
 #include "MachineMotion.h"
+#include "RunningGear.h"
+#include "DozerRig.h"
 #include "MudMachine.generated.h"
 
 class AMudTerrain;
@@ -12,7 +14,8 @@ class UStaticMeshComponent;
 class UProceduralMeshComponent;
 class UInstancedStaticMeshComponent;
 class UTextRenderComponent;
-
+class UMeshComponent;
+class UBoxComponent;
 enum class EMudMachine : uint8 { Dozer, Excavator, Dumper, Truck, Loader };
 
 struct FMudMachineSound
@@ -45,11 +48,16 @@ public:
     void Halt();
     void StopWork();
     double GetArticulation() const { return Articulation; }
+    double BladeYaw = 0;
     double ArticulationLimit() const;
     void RestoreArticulation(double Angle);
     void UpdatePose(const AMudTerrain& Terrain);
     FVector ToolPoint() const;
+    // Swept collision of an airborne material packet against the moving bed.
+    bool InterceptMaterial(FVector From, FVector& To, FVector& Velocity, Earthwork::Load& Material, bool bReceive = true);
+    FVector BedLoadPoint() const;
     FTransform CabView() const;
+    USceneComponent* GetDriverSeat() const { return DriverSeat; }
     bool BlocksPedestrian(FVector2D Point, double Height, double Radius) const;
     void UpdateCabInstruments();
     FString ToolDescription() const;
@@ -80,6 +88,8 @@ public:
     int32 RolledSide = 0;
 
 private:
+    friend class AMudWorldValidation;
+    friend class AMudMaterialReview;
     struct FWheelRig
     {
         USceneComponent* Hub;
@@ -88,6 +98,10 @@ private:
         double RadiusM;
         double Angle = 0;
         bool bOnRearFrame = false;
+        double ContactHalfWidthM = 0.28;
+        double InnerTyreOffsetM = 0;
+        TOptional<FVector2D> LastImprint;
+        RunningGear::SoilContact Soil;
     };
 
     struct FTrackRig
@@ -98,6 +112,7 @@ private:
         TArray<FTransform> GrouserTransforms;
         double LateralM = 0;
         double Phase = 0;
+        RunningGear::SoilContact Soil;
     };
 
     struct FHydraulicRig
@@ -118,6 +133,8 @@ private:
     UInstancedStaticMeshComponent* RepeatedBoxes(const TCHAR* Paint, USceneComponent* Parent,
         const TArray<FTransform>& Transforms);
     UProceduralMeshComponent* BuildHeap(USceneComponent* Parent, FVector PositionCm, FVector SizeM);
+    void BuildCargoSurface(USceneComponent* Parent, FVector PositionCm, FVector SizeM);
+    void UpdateCargoGrains(const UMeshComponent& Surface, double Fraction);
     void UpdateBladeHeap(const AMudTerrain& Terrain, double Fraction);
     void BuildBucket();
     void BuildLoaderBucket(double HalfWidth);
@@ -137,7 +154,7 @@ private:
     void BuildTyreShell(USceneComponent* Hub, double WidthScale);
     void BuildWheelRim(USceneComponent* Hub, double Side, double WidthScale, const TCHAR* Paint);
     void BuildBucketEdge(double HalfToothSpan, FVector Lip);
-    void UpdateTrack(FTrackRig& Track);
+    void UpdateTrack(FTrackRig& Track, const AMudTerrain* Terrain = nullptr);
     void AnimateRunningGear(double Distance, double YawRadians, double FrontSteering, double RearDistance = 0, double RearYaw = 0);
     double HingeOffsetCm() const;
     FVector2D RearFramePoint(FVector2D Center, double FrontHeading, double RearAngle, double RearOffsetM) const;
@@ -151,10 +168,11 @@ private:
     double FindDigAngle(const AMudTerrain& Terrain, double TargetHeight) const;
     static const FVector BoomMount, StickMount, BucketMount, StickRamPin, BucketRamBase;
     static const FVector DozerPushPivot, DozerBladePin;
-    static constexpr double DozerPushLength = 388;
-    static constexpr double DozerPushHalfWidth = 156;
-    static constexpr int32 BladeHeapColumns = 15;
-    static constexpr int32 BladeHeapRows = 11;
+    static constexpr double DozerPushLength = DozerRig::PushLength;
+    static constexpr double DozerPushHalfWidth = DozerRig::PushHalfWidth;
+    static constexpr int32 BladeHeapColumns = 33;
+    static constexpr int32 BladeHeapRows = 21;
+    static constexpr int32 BladeClodCount = 10;
     static constexpr double TruckFrontAxleCm = 260;
     static constexpr double TruckFirstRearAxleCm = -155;
     static constexpr double TruckSecondRearAxleCm = -292;
@@ -181,11 +199,14 @@ private:
     UPROPERTY() TObjectPtr<UStaticMeshComponent> BucketLink;
     UPROPERTY() TObjectPtr<USceneComponent> LoaderRocker;
     UPROPERTY() TObjectPtr<USceneComponent> DozerPushArms;
+    UPROPERTY() TObjectPtr<USceneComponent> DozerYawCarrier;
     UPROPERTY() TObjectPtr<USceneComponent> TipBed;
     UPROPERTY() TObjectPtr<USceneComponent> TruckTailgate;
     UPROPERTY() TObjectPtr<USceneComponent> RearFrame;
+    UPROPERTY() TObjectPtr<UBoxComponent> EnvironmentCollider;
     UPROPERTY() TObjectPtr<UProceduralMeshComponent> Payload;
     UPROPERTY() TObjectPtr<USceneComponent> CabEye;
+    USceneComponent* DriverSeat = nullptr;
     UPROPERTY() TObjectPtr<USceneComponent> CabWheel;
     UPROPERTY() TObjectPtr<USceneComponent> CabLeverA;
     UPROPERTY() TObjectPtr<USceneComponent> CabLeverB;
@@ -195,13 +216,16 @@ private:
     TArray<FTrackRig> Tracks;
     TArray<FHydraulicRig> Hydraulics;
     Earthwork::Material CargoVisual = Earthwork::Material::Soil;
+    UStaticMeshComponent* CargoSurface = nullptr;
+    UInstancedStaticMeshComponent* CargoGrains[Earthwork::MaterialCount]{};
+    Earthwork::Load RenderedCargo;
     double DriveCommand = 0;
     double SteeringCommand = 0;
     double Articulation = 0;
     MachineMotion::TipControl Bed;
     double BladeLift = 0.67;
     TOptional<double> BladeDatum;
-    TArray<FVector> BladeHeapShape;
+    UInstancedStaticMeshComponent* BladeClods = nullptr;
     TOptional<FVector> BladeHeapAnchor;
     double BladeHeapHeading = 0;
     double BladeHeapFraction = 0;
@@ -213,6 +237,10 @@ private:
     double ValveTilt = 0;
     double ValveSwing = 0;
     double MaterialMoved = 0;
+    double LastWorkVolume = 0;
+    double DraftForceKN = 0;
+    TOptional<FTransform> LastBladePose;
+    TOptional<FVector> LastToolContact;
     float SoundTravel = 0;
     float SoundHydraulic = 0;
     float SoundSteering = 0;
@@ -224,6 +252,8 @@ private:
     Earthwork::Material SoundMaterial = Earthwork::Material::Soil;
     double TrackTravel = 0;
     double TrackScrub = 0;
+    bool bBogged = false;
+    RunningGear::SoilDrivetrain Drivetrain;
     enum class EDigPhase : uint8 { Idle, Approach, Scoop, Lift };
     EDigPhase DigPhase = EDigPhase::Idle;
     double DigTime = 0;

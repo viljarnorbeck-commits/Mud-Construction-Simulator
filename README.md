@@ -1,6 +1,11 @@
 # Mud Construction Simulator
 
-Ett Windows-spelprojekt i Unreal Engine 5.7. Uppdraget går ut på att bygga en passage genom dalen och leverera minst 18 m³ i terränglastbilen från den gula gården till den röda portalen. Gräv ur marken, hämta material från fem depåer och höj ett av de två vadställena. Skopa, flak och mark delar samma volymbokföring.
+Den aktuella terrängrevisionen är **earthworks-v4-42**, en 2 × 2 km-värld som
+genereras till `world/42` och används av standardbygget. Se
+[NATURAL-TERRAIN.md](NATURAL-TERRAIN.md) för nya landskapsformer, verifiering och
+separata sparprofiler. De äldre vadinstruktionerna nedan beskriver den tidigare kartan.
+
+Ett Windows-spelprojekt i Unreal Engine 5.7. Bygg en väg över ett av de två markerade vadställena och leverera minst 18 m³ med lastbilen från den gula startgården till den röda portalen. Fyll upp de blöta partierna, lägg ett sammanhängande lager grus eller kross och jämna av körbanan med bulldozern. Det finns en extra grusdepå nära det södra vadet. Tryck **9** för att se hur mycket av varje passage som är körbar. Skopa, flak och mark delar samma volymbokföring.
 
 ## Bygg och kör på Windows
 
@@ -105,3 +110,11 @@ Fristående test av massbalans, last och bärighet kan köras med en C++17-kompi
 c++ -std=c++17 -ISource/MudConstructionSimulator/Public tests/earthwork.cpp -o /tmp/mud-earthwork
 /tmp/mud-earthwork
 ```
+
+## Markfysik och testmiljö
+
+Se [SOIL_SIMULATION.md](SOIL_SIMULATION.md) för arkitektur, testresultat, kvarvarande begränsningar och hur marklabbet startas.
+
+## Highlands
+
+Den nya världen är 2 × 2 km. Start, tester och resultat finns i [HIGHLANDS.md](HIGHLANDS.md).

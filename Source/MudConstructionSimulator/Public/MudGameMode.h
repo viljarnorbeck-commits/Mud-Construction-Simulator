@@ -13,7 +13,7 @@ class AMudMachine;
 class UMudAudio;
 class UCameraComponent;
 class USkeletalMeshComponent;
-
+class UPoseableMeshComponent;
 UCLASS()
 class AMudGameMode : public AGameModeBase
 {
@@ -29,6 +29,7 @@ class AMudOperator : public APawn
 public:
     AMudOperator();
     void BeginPlay() override;
+    void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
     void Tick(float DeltaSeconds) override;
     void SetupPlayerInputComponent(UInputComponent* Input) override;
     AMudTerrain* GetTerrain() const { return Terrain; }
@@ -39,13 +40,15 @@ public:
     FString SurveyText() const;
     FString StatusText() const;
     bool IsCabView() const { return bCab; }
+    bool IsPauseMenuOpen() const { return bPauseMenuOpen; }
+    static FBox2D PauseButtonBounds(FVector2D ScreenSize, int32 Button);
     float FrameSeconds = 0;
     bool bShowMap = false;
     bool bShowHelp = true;
-
 private:
     UPROPERTY() TObjectPtr<UCameraComponent> Camera;
     UPROPERTY() TObjectPtr<USkeletalMeshComponent> FootAvatar;
+    UPoseableMeshComponent* DriverAvatar = nullptr;
     UPROPERTY() TObjectPtr<UMudAudio> Audio;
     UPROPERTY() TObjectPtr<AMudTerrain> Terrain;
     UPROPERTY() TArray<AMudMachine*> Fleet;
@@ -96,10 +99,17 @@ private:
     double MessageTime = 0;
     FString Message;
     bool bInitializeFailed = false;
+    bool bProtectSave = false;
+    double NextAutosave = 0;
     double BenchmarkStart = 0;
     double BenchmarkLast = 0;
     TArray<double> BenchmarkFrames;
-
+    TArray<double> BenchmarkSoilTimes;
+    TArray<int32> BenchmarkActiveCells;
+    bool bPauseMenuOpen = false;
+    void TogglePauseMenu();
+    void ClosePauseMenu();
+    void ClickPauseMenu();
     void Step(double Dt, const FVector2D& Hydraulics, const MachineMotion::HydraulicInput& Mouse);
     void UpdateCamera(float Dt = 0);
     void InitializeFootAvatar();
@@ -151,12 +161,15 @@ private:
     void Service();
     void Save();
     void Load();
+    bool WriteProgress() const;
+    bool RestoreProgress();
     void PerformanceMode();
     void QualityMode();
     void ApplyQualityMode(bool bUseDesktop);
     void ToggleFullscreen();
     void Quit();
     void Notify(const FString& Text);
+    void UpdateDriverAvatar(const AMudMachine* Machine);
 };
 UCLASS()
 class AMudHUD : public AHUD

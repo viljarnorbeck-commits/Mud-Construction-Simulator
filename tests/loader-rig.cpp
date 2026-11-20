@@ -43,12 +43,17 @@ bool HasClearance(const std::array<Point, N>& A, const std::array<Point, M>& B, 
 
 int main()
 {
+    const Point Dig = CuttingEdge(MinBoom, 0);
+    const Point Dump = CuttingEdge(MaxBoom, -45);
+    assert(std::abs(Dig.Z) < 12); // normal scraping depth, no buried shell
+    assert(Dump.Z > 300 && Dump.Z < 340); // both production bed rims, including clearance
+    assert(Dump.X > 285 && Dump.X < 340); // over the side with the tyres clear
     constexpr double ToRadians = 3.14159265358979323846 / 180;
     for (double Boom = MinBoom; Boom <= MaxBoom; Boom += 0.5)
     {
         for (double Curl = MinCurl; Curl <= MaxCurl; Curl += 0.5)
         {
-            const double Pitch = (Curl - Boom) * ToRadians;
+            const double Pitch = BucketPitch(Boom, Curl) * ToRadians;
             const Point Ear = Coupler + Rotate(BucketEar, Pitch);
             const Point Joint = LinkPin(Ear);
             assert(std::abs(Length(Joint - RockerPin) - RockerLength) < 1e-7);
@@ -74,8 +79,13 @@ int main()
                 Vertex = RockerPin + Rotate(Vertex, RockerAngle);
             assert(Clear(RockerShape));
             assert(Clear(std::array<Point, 2>{Joint, Ear}, 8.5));
-            const Point CylinderBase = Rotate(TiltBase - Mount, -Boom * ToRadians);
+            const Point CylinderBase = TiltBase;
             const Point CylinderRod = RockerPin + Rotate(TiltRod, RockerAngle);
+            const double TiltLength = Length(CylinderRod - CylinderBase);
+            assert(TiltLength > 148 && TiltLength < 240);
+            const Point LiftEnd = Mount + Rotate(LiftRod, Boom * ToRadians);
+            const double LiftLength = Length(LiftEnd - LiftBase);
+            assert(LiftLength > 170 && LiftLength < 300);
             assert(Clear(std::array<Point, 2>{CylinderBase, CylinderRod}, 9.5));
         }
     }

@@ -1,0 +1,4 @@
+run,width,height,screen_percentage,tile_m,surface_spacing_m,mean_frame_ms,p95_frame_ms,mean_fps,simulation_mean_ms,terrain_update_mean_ms,soil_solver_mean_ms,dozer_peak_m3,loader_peak_m3,max_mass_error_t
+baseline,1600,900,100,64,0.25,79.693,108.638,12.55,,,,5.646609,1.638144,0.000000000
+smaller_tiles,1600,900,100,32,0.25,18.562,26.912,53.87,,,,5.646609,1.638144,0.000000000
+final_instrumented,1600,900,100,32,0.25,19.245,27.992,51.96,0.85,14.27,0.11,5.646609,1.638144,0.000000000

@@ -1,6 +1,7 @@
 """Material compilation for the procedural valley."""
 
 import math
+import subprocess
 import struct
 import tempfile
 import zlib
@@ -37,6 +38,7 @@ def import_texture(asset_tools, file, normal=False):
 
 class Graph:
     def __init__(self, asset_tools, name, folder=FOLDER):
+        unreal.log(f"Material graph: {name}")
         self.name = name
         path = f"{folder}/{name}"
         self.material = ASSETS.load_asset(path) if ASSETS.does_asset_exist(path) else None
@@ -102,8 +104,9 @@ class Graph:
         return encoded, relief, (encoded[0], "A")
 
     def finish(self):
-        EDIT.layout_material_expressions(self.material)
+        unreal.log(f"Compiling material: {self.name}")
         errors = EDIT.recompile_material(self.material)
+        unreal.log(f"Compiled material: {self.name}")
         if errors:
             raise RuntimeError(f"{self.name}: {errors}")
         if not ASSETS.save_loaded_asset(self.material, only_if_is_dirty=False):
@@ -117,47 +120,122 @@ def blend(graph, left, right, factor):
     return tuple(graph.lerp(a, b, factor) for a, b in zip(left, right))
 
 
+def attenuate_normal(g, normal, strength):
+    depth = g.node("PixelDepth")
+    subtract = g.node("Subtract")
+    g.connect(g.scalar(8500), subtract, "A")
+    g.connect(depth, subtract, "B")
+    fade = g.node("Saturate")
+    g.connect(g.multiply(subtract, g.scalar(1 / 7000)), fade, "")
+    return g.lerp(g.color((0, 0, 1)), normal, g.multiply(fade, g.scalar(strength)))
+
+
+def custom_node(g, code, output, values):
+    inputs=[]
+    for name in values:
+        entry=unreal.CustomInput(); entry.set_editor_property("input_name",name); inputs.append(entry)
+    result=g.node("Custom",code=code,output_type=output,inputs=inputs)
+    for name,value in values.items(): g.connect(value,result,name)
+    return result
+
+
+def ground_surface(g, maps, scale, strength, weight):
+    world=g.node("WorldPosition"); normal_ws=g.node("VertexNormalWS")
+    encoded=custom_node(g,"""
+[branch] if(Weight<0.0001) return 0;
+float3 p=World*Scale*0.01;
+float3 w=pow(abs(N),8); w/=max(w.x+w.y+w.z,0.0001);
+float4 c=Texture2DSampleGrad(Tex,TexSampler,p.xy,ddx(p.xy),ddy(p.xy));
+[branch] if(w.z<0.995) c=c*w.z+
+ Texture2DSampleGrad(Tex,TexSampler,p.yz,ddx(p.yz),ddy(p.yz))*w.x+
+ Texture2DSampleGrad(Tex,TexSampler,p.xz,ddx(p.xz),ddy(p.xz))*w.y;
+return c;
+""",unreal.CustomMaterialOutputType.CMOT_FLOAT4,
+        {"Tex":g.node("TextureObject",texture=maps[0]),"World":world,"N":normal_ws,
+         "Scale":g.scalar(scale),"Weight":weight})
+    relief=custom_node(g,"""
+float3 flat=float3(0,0,1);
+float fade=saturate((8500-Depth)/7000)*Strength*N.z*N.z;
+[branch] if(Weight<0.0001 || fade<0.005) return flat;
+float2 uv=World.xy*Scale*0.01;
+float2 xy=Texture2DSampleGrad(Tex,TexSampler,uv,ddx(uv),ddy(uv)).rg*2-1;
+return lerp(flat,float3(xy,sqrt(saturate(1-dot(xy,xy)))),fade);
+""",unreal.CustomMaterialOutputType.CMOT_FLOAT3,
+        {"Tex":g.node("TextureObject",texture=maps[1],sampler_type=unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL),
+         "World":world,"N":normal_ws,"Scale":g.scalar(scale),"Weight":weight,
+         "Depth":g.node("PixelDepth"),"Strength":g.scalar(strength)})
+    color=g.node("ComponentMask",r=True,g=True,b=True,a=False)
+    roughness=g.node("ComponentMask",r=False,g=False,b=False,a=True)
+    g.connect(encoded,color,""); g.connect(encoded,roughness,"")
+    return color,relief,roughness
+
+
 def make_ground(asset_tools, surfaces):
     g = Graph(asset_tools, "Ground")
     vertex = g.node("VertexColor")[0]
-    grass, aggregate, variation, wetness = ((vertex, name) for name in ("R", "G", "B", "A"))
-    # UVs are world metres. Keep the photographed texture scale close to the original surfaces.
-    soil, soil_normal, soil_roughness = g.surface(surfaces["Soil"], g.uv(0.69))
-    soil = (g.multiply(soil, g.color((0.88, 0.77, 0.64))), soil_normal, soil_roughness)
-    mud = g.surface(surfaces["Mud"], g.uv(0.55))
-    turf, turf_normal, turf_roughness = g.surface(surfaces["Grass"], g.uv(0.47))
-    meadow_tint = g.lerp(g.color((0.50, 0.66, 0.48)), g.color((0.84, 0.92, 0.60)), variation)
-    turf = (g.multiply(turf, meadow_tint), turf_normal, turf_roughness)
-    stone, stone_normal, stone_roughness = g.surface(surfaces["Gravel"], g.uv(0.82))
-    gravel_tint = g.lerp(g.color((0.75, 0.80, 0.83)), g.color((1.08, 1.04, 0.95)), variation)
-    gravel = (g.multiply(stone, gravel_tint), stone_normal, stone_roughness)
-    bare = blend(g, soil, mud, wetness)
-    color, normal, roughness = blend(g, blend(g, bare, turf, grass), gravel, aggregate)
-    work = g.node("TextureCoordinate", coordinate_index=1)
-    cut = g.node("ComponentMask", r=True, g=False, b=False, a=False)
-    fill = g.node("ComponentMask", r=False, g=True, b=False, a=False)
-    g.connect(work, cut, "")
-    g.connect(work, fill, "")
-    color = g.lerp(color, g.multiply(color, g.color((0.83, 0.66, 0.52))), cut)
-    color = g.lerp(color, g.multiply(color, g.color((1.14, 1.065, 0.94))), fill)
-    patch_tone = g.lerp(g.scalar(0.72), g.scalar(1.15), variation)
-    g.bind(g.multiply(color, patch_tone), PROPERTY.MP_BASE_COLOR)
-    g.bind(normal, PROPERTY.MP_NORMAL)
-    # The wet scan supplies the darker color. Water also lowers the surface roughness.
-    dampness = g.lerp(g.scalar(1.04), g.scalar(0.67), wetness)
-    broken_surface = g.lerp(g.scalar(1.0), g.scalar(1.16), fill)
-    g.bind(g.multiply(g.multiply(roughness, dampness), broken_surface), PROPERTY.MP_ROUGHNESS)
+    grass, gravel, variation, wet = ((vertex,name) for name in ("R","G","B","A"))
+    minerals = g.node("TextureCoordinate", coordinate_index=2)
+    rock_coord = g.node("TextureCoordinate", coordinate_index=3)
+    def component(source, channel):
+        node = g.node("ComponentMask", r=channel==0, g=channel==1, b=False, a=False)
+        g.connect(source,node,""); return node
+    sand, clay, rock = component(minerals,0), component(minerals,1), component(rock_coord,0)
+    weights = [grass,gravel,sand,clay,rock]
+    total = weights[0]
+    for weight in weights[1:]:
+        add=g.node("Add"); g.connect(total,add,"A"); g.connect(weight,add,"B"); total=add
+    remaining=g.node("OneMinus"); g.connect(total,remaining,"")
+    dry=g.node("OneMinus"); g.connect(wet,dry,"")
+    soil=ground_surface(g,surfaces["Soil"],0.60,0.30,g.multiply(remaining,dry))
+    mud=ground_surface(g,surfaces["Mud"],0.52,0.16,g.multiply(remaining,wet))
+    entries=[(blend(g,soil,mud,wet),remaining)]
+    for name,weight,scale,strength in (("Grass",grass,.45,.20),("Gravel",gravel,.74,.46),
+        ("Sand",sand,.48,.055),("Clay",clay,.43,.10),("Rock",rock,.27,.48)):
+        entries.append((ground_surface(g,surfaces[name],scale,strength,weight),weight))
+    result=[]
+    for channel in range(3):
+        summed=None
+        for surface,weight in entries:
+            value=g.multiply(surface[channel],weight)
+            if summed is None: summed=value
+            else:
+                add=g.node("Add"); g.connect(summed,add,"A"); g.connect(value,add,"B"); summed=add
+        result.append(summed)
+    color,normal,roughness=result
+    work=g.node("TextureCoordinate",coordinate_index=1)
+    cut,fill=component(work,0),component(work,1)
+    color=g.lerp(color,g.multiply(color,g.color((.92,.87,.81))),cut)
+    color=g.lerp(color,g.multiply(color,g.color((1.04,1.025,.99))),fill)
+    color=g.multiply(color,g.lerp(g.scalar(.94),g.scalar(1.06),variation))
+    g.bind(color,PROPERTY.MP_BASE_COLOR)
+    normalized=g.node("Normalize"); g.connect(normal,normalized,"")
+    g.bind(normalized,PROPERTY.MP_NORMAL)
+    g.bind(g.lerp(roughness,g.scalar(.48),wet),PROPERTY.MP_ROUGHNESS)
+    g.bind(g.scalar(.25),PROPERTY.MP_SPECULAR)
     g.finish()
 
 
-def make_cargo(asset_tools, name, maps, tint, scale):
+def make_cargo(asset_tools, name, maps, tint, scale, instanced=True):
     g = Graph(asset_tools, name)
-    g.enable_instances()
+    if instanced:
+        g.enable_instances()
     color, relief, roughness = g.surface(maps, g.uv(scale))
     g.bind(g.multiply(color, g.color(tint)), PROPERTY.MP_BASE_COLOR)
-    g.bind(relief, PROPERTY.MP_NORMAL)
+    g.bind(attenuate_normal(g, relief, 0.30), PROPERTY.MP_NORMAL)
     g.bind(roughness, PROPERTY.MP_ROUGHNESS)
     g.finish()
+
+
+def make_cargo_materials(asset_tools, surfaces):
+    for material, deposit, maps, tint, scale in (
+        ("Loose", "PayloadSoil", surfaces["Soil"], (0.92, 0.85, 0.76), 1.1),
+        ("LooseGravel", "PayloadGravel", surfaces["Gravel"], (1.06, 1.04, 1.00), 1.4),
+        ("LooseRock", "PayloadRock", surfaces["Rock"], (0.88, 0.93, 1.00), 0.8),
+        ("LooseSand", "PayloadSand", surfaces["Sand"], (1.04, 1.01, 0.94), 0.8),
+        ("LooseClay", "PayloadClay", surfaces["Clay"], (0.96, 0.89, 0.83), 0.9),
+    ):
+        make_cargo(asset_tools, material, maps, tint, scale)
+        make_cargo(asset_tools, deposit, maps, tint, scale, instanced=False)
 
 
 def water_texture():
@@ -337,15 +415,15 @@ def make_cab_interiors(asset_tools):
 
 def build_materials(asset_tools):
     folder = Path(__file__).resolve().parent.parent / "art" / "surfaces"
+    subprocess.run(["node", str(Path(__file__).with_name("prepare-surfaces.mjs"))], check=True)
+    normal_source = {"Sand": "Soil", "Clay": "Mud", "Rock": "Gravel"}
     surfaces = {
-        name: (import_texture(asset_tools, folder / f"{name}_Color.png"),
-               import_texture(asset_tools, folder / f"{name}_Normal.jpg", normal=True))
-        for name in ("Soil", "Mud", "Grass", "Gravel")
+        name: (import_texture(asset_tools, folder / "Prepared" / f"{name}_Color.png"),
+               import_texture(asset_tools, folder / f"{normal_source.get(name, name)}_Normal.jpg", normal=True))
+        for name in ("Soil", "Mud", "Grass", "Gravel", "Sand", "Clay", "Rock")
     }
     make_ground(asset_tools, surfaces)
-    make_cargo(asset_tools, "Loose", surfaces["Soil"], (0.84, 0.70, 0.54), 2.8)
-    make_cargo(asset_tools, "LooseGravel", surfaces["Gravel"], (1.11, 1.05, 0.95), 2.4)
-    make_cargo(asset_tools, "LooseRock", surfaces["Gravel"], (0.68, 0.77, 0.81), 1.3)
+    make_cargo_materials(asset_tools, surfaces)
     make_water(asset_tools)
     make_palette(asset_tools, surfaces["Mud"])
     make_cab_glazing(asset_tools)
