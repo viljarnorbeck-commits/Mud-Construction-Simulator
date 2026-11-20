@@ -22,6 +22,15 @@ private:
     FString Folder;
     int32 Frame=0;
     bool bDozerReview=false;
+    bool bTerrainReview=false;
+    bool bSoftSoilReview=false;
+    bool SoftSoilPassed=true;
+    double SoilMass=0,SoilInitialHeight=0,DozerPeak=0,LoaderPeak=0,SoilMassError=0;
+    void ReviewSoftSoil();
+    int32 TerrainStage=-1;
+    FVector2D DriveStart;
+    FString TerrainDriveLog;
+    void ReviewTerrain();
     TArray<double> Timings;
     TArray<double> WorkTimings;
     void View(FVector Location,FVector Target);

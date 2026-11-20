@@ -2,6 +2,16 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { deflateSync, crc32 } from 'node:zlib';
 
+// The normal command now generates the same natural earthworks world used by
+// Windows builds. Keep the old 1 km map available only by explicit request.
+if(!process.argv.includes('--legacy')) {
+  process.argv[3]??=join('world',String(process.argv[2]??42));
+  process.argv.push('--earthworks');
+  await import('./generate-highlands.mjs');
+  process.exit(0);
+}
+process.argv=process.argv.filter(arg=>arg!=='--legacy');
+
 const seed = Number(process.argv[2] ?? 42);
 if (!Number.isInteger(seed) || seed < 0 || seed > 0xffffffff) {
   throw new Error('The seed must be an integer from 0 to 4294967295.');
@@ -13,6 +23,7 @@ const maxElevation = 96;
 const start = { x: 115, y: 795 };
 const goal = { x: 906, y: 231 };
 const fords = [345, 733];
+const fordDepths = [1.52, 1.24];
 const mudPits = [
   { x: 381, y: 735, rx: 67, ry: 36, depth: 2.4 },
   { x: 663, y: 384, rx: 48, ry: 36, depth: 2 },
@@ -42,6 +53,29 @@ const mix = (a, b, weight) => a + (b - a) * weight;
 const riverX = y => 505 + 34 * Math.sin(y / 116 + phase) + 9 * Math.sin(y / 37);
 const waterLevel = y => 11 - 0.004 * y;
 const riverWidth = y => 13 + 4 * Math.sin(y / 101 + phase);
+const roadFord = fords[1];
+const roadPits = [-1, 1].map(side => ({
+  x: +((riverX(roadFord) + side * 17).toFixed(2)), y: roadFord, rx: 15, ry: 16, depth: 0.68,
+}));
+const roadGravel = { material: 'gravel', x: Math.round(riverX(roadFord)) - 76,
+  y: roadFord - 28, radius: 13, height: 3.5, volumeM3: 0 };
+piles.push(roadGravel);
+const creekStart = 200;
+const creekMouthY = 642;
+const creekEnd = Math.round(riverX(creekMouthY) / 4) * 4;
+const creekCrossingX = 320;
+
+function creekAt(x) {
+  const upstream = creekEnd - x;
+  const t = (x - creekStart) / (creekEnd - creekStart);
+  const y = creekMouthY + 10 * Math.sin(upstream / 33) + 10 * Math.sin(upstream / 85);
+  const z = waterLevel(creekMouthY) + 6.8 * (1 - t) + 2.8 * Math.max(0, 1 - t / 0.28) ** 2
+    - 0.065 * (1 - smooth(upstream / 10));
+  const ford = Math.exp(-((x - creekCrossingX) ** 2) / 95);
+  return { x, y, z, width: 4.8 + 1.15 * Math.sin(x / 21), depth: mix(0.76, 0.33, ford) };
+}
+
+const creekColumns = Array.from({ length: creekEnd - creekStart + 1 }, (_, i) => creekAt(creekStart + i));
 
 function hill(x, y, cx, cy, rx, ry, height) {
   return height * Math.exp(-(((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2));
@@ -52,11 +86,12 @@ function levelPad(elevation, x, y, pad, flatRadius, edgeRadius, level) {
   return mix(level, elevation, smooth((distance - flatRadius) / (edgeRadius - flatRadius)));
 }
 
-function terrainAt(x, y) {
+function terrainAt(x, y, includeWorksites = true) {
   const distanceFromRiver = Math.abs(x - riverX(y));
   const riverWeight = smooth((distanceFromRiver - riverWidth(y) / 2) / 24);
-  const fordWeight = Math.max(...fords.map(ford => Math.exp(-((y - ford) ** 2) / 170)));
-  const riverbed = waterLevel(y) - mix(2.9, 0.95, fordWeight);
+  const fordCut = Math.max(...fords.map((ford, i) =>
+    (2.9 - (includeWorksites ? fordDepths[i] : 0.95)) * Math.exp(-((y - ford) ** 2) / 170)));
+  const riverbed = waterLevel(y) - 2.9 + fordCut;
   const upland =
     waterLevel(y) + 3 + distanceFromRiver * 0.019
     + 2.4 * Math.sin(x / 52 + phase) * Math.cos(y / 63)
@@ -73,16 +108,39 @@ function terrainAt(x, y) {
     elevation -= pit.depth * weight;
     mud = Math.max(mud, weight);
   }
+  if (includeWorksites) {
+    for (const pit of roadPits) {
+      const r = Math.hypot((x - pit.x) / pit.rx, (y - pit.y) / pit.ry);
+      const weight = 1 - smooth(r);
+      elevation -= pit.depth * weight;
+      mud = Math.max(mud, weight);
+    }
+    const across = x - riverX(y);
+    const shoulder = smooth((Math.abs(across) - 9) / 11) * (1 - smooth((Math.abs(across) - 26) / 11));
+    const worksite = 1 - smooth(Math.abs(y - roadFord) / 17);
+    elevation += shoulder * worksite * (0.43 * Math.sin(across * 0.53) + 0.19 * Math.sin(y * 0.39 + across * 0.29));
+  }
   elevation = levelPad(elevation, x, y, start, 25, 56, 18);
   elevation = levelPad(elevation, x, y, goal, 21, 90, 48);
+  const creek = includeWorksites ? creekColumns[x - creekStart] : undefined;
+  let creekWater = false;
+  if (creek) {
+    const distance = Math.abs(y - creek.y);
+    const halfWidth = creek.width * 0.5;
+    const carving = smooth((x - creekStart) / 14) * (1 - smooth((distance - halfWidth) / 9));
+    elevation = mix(elevation, Math.min(elevation, creek.z - creek.depth), carving);
+    creekWater = distance < halfWidth + 5 && elevation < creek.z;
+    mud = Math.max(mud, 0.60 * (1 - smooth((distance - halfWidth) / 9)));
+  }
   for (const pile of piles) {
+    if (!includeWorksites && pile === roadGravel) continue;
     const distance = Math.hypot(x - pile.x, y - pile.y);
     if (distance < pile.radius) {
       const deposit = pile.height * (1 - distance / pile.radius);
       return { elevation: elevation + deposit, deposit, pile, mud, water: false };
     }
   }
-  return { elevation, mud, water: elevation < waterLevel(y) && distanceFromRiver < 32 };
+  return { elevation, mud, water: creekWater || (elevation < waterLevel(y) && distanceFromRiver < 32) };
 }
 
 function png(width, height, depth, colorType, scanlines) {
@@ -150,13 +208,23 @@ for (let y = 5; y < size - 5; y += 10) {
   for (let x = 5; x < size - 5; x += 10) {
     const tx = x + Math.floor(random() * 7) - 3;
     const ty = y + Math.floor(random() * 7) - 3;
-    const { elevation, mud, pile, water } = terrainAt(tx, ty);
+    const { mud, pile, water } = terrainAt(tx, ty, false);
     const density = 0.23 + 0.2 * Math.sin(tx / 83 + phase) * Math.cos(ty / 109);
     if (random() >= density || water || mud > 0.16 || pile) continue;
     if (Math.abs(tx - riverX(ty)) < 15) continue;
     if (Math.hypot(tx - start.x, ty - start.y) < 59 || Math.hypot(tx - goal.x, ty - goal.y) < 54) continue;
-    trees.push({ x: tx, y: ty, z: +elevation.toFixed(2), scale: +(0.7 + random() * 0.7).toFixed(2) });
-    paintDot(tx, ty, 2, [32, 61, 44]);
+    // Preserve generation order because existing saves refer to trees by index.
+    const creek = creekColumns[tx - creekStart];
+    const nearBank = creek && Math.abs(ty - creek.y) < creek.width * 0.5 + 7;
+    const bankSide = ty < (creek?.y ?? ty) ? -1 : 1;
+    let treeY = nearBank ? Math.round(creek.y + bankSide * (creek.width * 0.5 + 9)) : ty;
+    const awayFromDepot = Math.abs(tx - roadGravel.x) < roadGravel.radius + 2;
+    if (awayFromDepot && Math.abs(treeY - roadGravel.y) < roadGravel.radius + 2) {
+      treeY = roadGravel.y + (treeY >= roadGravel.y ? 1 : -1) * (roadGravel.radius + 2);
+    }
+    const elevation = terrainAt(tx, treeY).elevation;
+    trees.push({ x: tx, y: treeY, z: +elevation.toFixed(2), scale: +(0.7 + random() * 0.7).toFixed(2) });
+    paintDot(tx, treeY, 2, [32, 61, 44]);
   }
 }
 paintDot(start.x, start.y, 9, [250, 202, 79]);
@@ -173,9 +241,15 @@ const world = {
       const y = i * 8;
       return { x: +riverX(y).toFixed(2), y, z: +waterLevel(y).toFixed(2), width: +riverWidth(y).toFixed(2) };
     }),
-    fords: fords.map(y => ({ x: +riverX(y).toFixed(2), y, centerDepthM: 0.95 })),
+    fords: fords.map((y, i) => ({ x: +riverX(y).toFixed(2), y, centerDepthM: fordDepths[i] })),
   },
-  mudPits,
+  creek: {
+    centerline: creekColumns.filter((_, i) => i % 4 === 0).map(({ x, y, z, width }) =>
+      ({ x, y: +y.toFixed(3), z: +z.toFixed(3), width: +width.toFixed(3) })),
+    crossing: { x: creekCrossingX, y: +creekAt(creekCrossingX).y.toFixed(3), centerDepthM: 0.33 },
+  },
+  roadContract: true,
+  mudPits: [...mudPits, ...roadPits],
   piles: piles.map(pile => ({ ...pile, volumeM3: Math.round(pile.volumeM3) })),
   trees,
 };

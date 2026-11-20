@@ -74,6 +74,19 @@ void Benchmark(const char* Name, int Areas, double Amount, bool Repeated)
 int main()
 {
     const int Center = 32 * Grid::Size + 32;
+    {
+        Grid Dry,Wet;Wet.Wet=1;
+        for(auto* Test:{&Dry,&Wet}){Test->Cells[Center].Add(Material::Clay,12);Test->Flow.WakeArea(Center);Test->Settle();}
+        Near(Dry.Mass(),Wet.Mass());
+        assert(Wet.Cells[Center].Height()+.15<Dry.Cells[Center].Height());
+        Grid Rock;Rock.Cells[Center]={0,{{Material::Rock,7,0,false}}};
+        const double FixedMass=Rock.Mass();Rock.Flow.WakeArea(Center);Rock.Settle();
+        Near(Rock.Cells[Center].Height(),7);Near(Rock.Mass(),FixedMass);
+        Rock.Cells[Center].Add(Material::Rock,3);Rock.Flow.WakeArea(Center);Rock.Settle();
+        assert(Rock.Cells[Center].Height()<9&&Rock.Cells[Center].Height()>=7);
+        Near(Rock.Mass(),FixedMass+3*TonnesPerM3[2]);
+        std::cout<<"Wet clay slumps farther; competent rock stays fixed while loose rubble moves; mass preserved\n";
+    }
     Grid G;
     const double OriginalMass = G.Mass();
     Load Added;

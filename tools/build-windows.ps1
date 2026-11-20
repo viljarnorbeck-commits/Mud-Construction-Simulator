@@ -9,7 +9,7 @@ param(
     [string]$CertificateThumbprint,
     [ValidatePattern('^https://[^\s"$]+$')]
     [string]$TimestampUrl,
-    [string]$WorldDirectory = 'world/earthworks-42',
+    [string]$WorldDirectory = 'world/42',
     [switch]$Launch
 )
 

@@ -89,6 +89,7 @@ public:
 
 private:
     friend class AMudWorldValidation;
+    friend class AMudMaterialReview;
     struct FWheelRig
     {
         USceneComponent* Hub;

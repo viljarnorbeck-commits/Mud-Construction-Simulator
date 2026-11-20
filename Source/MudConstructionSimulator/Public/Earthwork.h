@@ -8,6 +8,7 @@
 #include <vector>
 #include <deque>
 #include <unordered_set>
+#include <unordered_map>
 
 namespace Earthwork
 {
@@ -27,11 +28,11 @@ struct MaterialProperties
 };
 
 inline constexpr std::array<MaterialProperties, MaterialCount> DefaultMaterialTable{{
-    {0.82, 0.12, 38, 48, 0.12, 0.35, 0.22, 1.0},
-    {1.00, 0.74, 36, 40, 0.02, 0.85, 0.13, 1.3},
+    {0.82, 0.12, 38, 30, 0.12, 0.35, 0.22, 1.0},
+    {1.00, 0.74, 36, 34, 0.02, 0.85, 0.13, 1.3},
     {0.93, 0.67, 48, 48, 0.15, 1.00, 0.04, 3.2},
-    {0.67, 0.43, 31, 36, 0.00, 0.45, 0.18, 0.7},
-    {0.72, 0.12, 46, 60, 0.30, 0.22, 0.26, 1.8}
+    {0.67, 0.43, 31, 28, 0.00, 0.45, 0.18, 0.7},
+    {0.72, 0.12, 42, 27, 0.30, 0.22, 0.26, 1.8}
 }};
 inline auto MaterialTable = DefaultMaterialTable;
 
@@ -90,6 +91,7 @@ struct Layer
     // Reference loose volume determines mass. Packing changes occupied volume only.
     double Volume;
     double Packing = 0;
+    bool Loose = true; // Excavated/deposited rock is rubble; original bedrock is not.
     double BulkFactor() const { return 1.0 - Properties(Type).MaxCompression * Packing; }
     double Height() const { return Volume * BulkFactor(); }
 };
@@ -114,7 +116,7 @@ struct Column
     {
         if (Volume <= 0)
             return;
-        if (!Layers.empty() && Layers.back().Type == Type && Layers.back().Packing == 0)
+        if (!Layers.empty() && Layers.back().Type == Type && Layers.back().Packing == 0 && Layers.back().Loose)
             Layers.back().Volume += Volume;
         else
             Layers.push_back({Type, Volume});
@@ -186,6 +188,7 @@ struct Column
                 ActiveIndex = I + 1;
             }
             auto& Active = Layers[ActiveIndex];
+            if(Active.Type==Material::Rock&&!Active.Loose){Depth+=ActiveVolume;continue;}
             const double Attenuation = ActiveVolume > Epsilon ?
                 (std::exp(-Depth * 2.0) - std::exp(-(Depth + ActiveVolume) * 2.0)) / (2.0 * ActiveVolume) : 0;
             Active.Packing += (1.0 - Active.Packing) * (1.0 - std::exp(-std::max(0.0, Pressure) *
@@ -201,11 +204,13 @@ class ActiveSoil
 {
 public:
     explicit ActiveSoil(int Size = 0) : Size(Size) {}
-    void Reset(int NewSize) { Size = NewSize; Queue.clear(); Pending.clear(); }
+    void Reset(int NewSize) { Size = NewSize; Queue.clear(); Pending.clear(); LastVisit.clear(); Clock=0; }
     size_t ActiveCells() const { return Queue.size(); }
     void Wake(int Cell)
     {
-        if (Cell >= 0 && Cell < Size * Size && Pending.insert(Cell).second) Queue.push_back(Cell);
+        if (Cell >= 0 && Cell < Size * Size && Pending.insert(Cell).second) {
+            Queue.push_back(Cell);LastVisit.try_emplace(Cell,Clock);
+        }
     }
     void WakeArea(int Cell)
     {
@@ -219,6 +224,8 @@ public:
     template<class CellAt, class MoistureAt, class Changed>
     double Step(double Dt, size_t Budget, CellAt&& At, MoistureAt&& Moisture, Changed&& Update)
     {
+        if(Dt<=0)return 0;
+        Clock+=Dt;
         const size_t Visits = std::min(Budget, Queue.size());
         double MovedMass = 0;
         for (size_t Visit = 0; Visit < Visits; ++Visit)
@@ -226,30 +233,36 @@ public:
             const int From = Queue.front();
             Queue.pop_front(); Pending.erase(From);
             const int X = From % Size, Y = From / Size;
-            for (int DY = -1; DY <= 1; ++DY)
-                for (int DX = -1; DX <= 1; ++DX)
-                {
-                    if ((DX == 0 && DY == 0) || X + DX < 0 || X + DX >= Size || Y + DY < 0 || Y + DY >= Size)
-                        continue;
-                    const int To = From + DY * Size + DX;
-                    const auto Type = At(From).Surface();
-                    if (At(From).Layers.empty()) continue;
-                    const auto& P = Properties(Type);
-                    const double Wet = std::clamp(Moisture(From), 0.0, 1.0);
-                    const double Packing = At(From).Layers.back().Packing;
-                    const double Angle = (P.DryRepose + (P.WetRepose - P.DryRepose) * Wet + Packing * 4.0) * 0.017453292519943295;
-                    const double Length = DX != 0 && DY != 0 ? 1.4142135623730951 : 1.0;
-                    const double Excess = At(From).Height() - At(To).Height() - std::tan(Angle) * Length - P.Cohesion * (1 + Wet);
-                    if (Excess <= 0.004) continue;
-                    const double Thickness = At(From).Layers.back().Height();
-                    const double Transfer = std::min({Excess * 0.24, Thickness, Dt * 4.0});
-                    if (Transfer <= Epsilon) continue;
-                    const Load Flow = At(From).Cut(Transfer);
-                    At(To).Fill(Flow);
-                    MovedMass += Flow.Mass();
-                    Update(From); Update(To);
-                    WakeArea(From); WakeArea(To);
-                }
+            const double Elapsed=std::clamp(Clock-LastVisit[From],Dt,std::max(Dt,.15));LastVisit[From]=Clock;
+            if(At(From).Layers.empty() || (At(From).Surface()==Material::Rock&&!At(From).Layers.back().Loose)) {
+                LastVisit.erase(From);continue;
+            }
+            const auto Type=At(From).Surface();const auto P=Properties(Type);
+            const double Wet=std::clamp(Moisture(From),0.,1.),Packing=At(From).Layers.back().Packing;
+            const double Angle=(P.DryRepose+(P.WetRepose-P.DryRepose)*Wet+Packing*4)*.017453292519943295;
+            const double Cohesion=P.Cohesion*(1+.6*Packing)*(1-.8*Wet),Grade=std::tan(Angle);
+            struct Exit { int To; double Limit,Excess; };
+            std::array<Exit,8> Exits{};int Count=0;double Weight=0,Maximum=0;
+            for(int DY=-1;DY<=1;++DY)for(int DX=-1;DX<=1;++DX) {
+                if((!DX&&!DY)||X+DX<0||X+DX>=Size||Y+DY<0||Y+DY>=Size)continue;
+                const int To=From+DY*Size+DX;
+                const double Limit=Grade*(DX&&DY?1.4142135623730951:1.)+Cohesion;
+                const double Excess=At(From).Height()-At(To).Height()-Limit;
+                if(Excess>.004){Exits[Count++]={To,Limit,Excess};Weight+=Excess;Maximum=std::max(Maximum,Excess);}
+            }
+            const double Mobility=Type==Material::Sand?1.25:Type==Material::Clay?.25+1.15*Wet:Type==Material::Rock?.45:.9;
+            const double Available=std::min(At(From).Layers.back().Volume,Elapsed*8*Mobility*std::sqrt(Maximum));
+            for(int I=0;I<Count;++I) {
+                const auto E=Exits[(I+Visit)%Count];
+                if(At(From).Layers.empty()||At(From).Surface()!=Type)break;
+                const double Excess=At(From).Height()-At(E.To).Height()-E.Limit;
+                const double Bulk=At(From).Layers.back().BulkFactor();
+                const double Transfer=std::min({Available*E.Excess/Weight,std::max(0.,Excess)*.48/(Bulk+1),At(From).Layers.back().Volume});
+                if(Transfer<Epsilon)continue;
+                const Load Flow=At(From).Cut(Transfer);At(E.To).Fill(Flow);MovedMass+=Flow.Mass();
+                Update(From);Update(E.To);WakeArea(From);WakeArea(E.To);
+            }
+            if(!Pending.count(From))LastVisit.erase(From);
         }
         return MovedMass;
     }
@@ -257,6 +270,8 @@ private:
     int Size;
     std::deque<int> Queue;
     std::unordered_set<int> Pending;
+    std::unordered_map<int,double> LastVisit;
+    double Clock=0;
 };
 
 inline double SurfaceGrip(Material Type, double Wetness, double Submersion)

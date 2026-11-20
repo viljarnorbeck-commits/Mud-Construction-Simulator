@@ -13,6 +13,7 @@ class AMudMachine;
 class UMudAudio;
 class UCameraComponent;
 class USkeletalMeshComponent;
+class UPoseableMeshComponent;
 UCLASS()
 class AMudGameMode : public AGameModeBase
 {
@@ -39,12 +40,15 @@ public:
     FString SurveyText() const;
     FString StatusText() const;
     bool IsCabView() const { return bCab; }
+    bool IsPauseMenuOpen() const { return bPauseMenuOpen; }
+    static FBox2D PauseButtonBounds(FVector2D ScreenSize, int32 Button);
     float FrameSeconds = 0;
     bool bShowMap = false;
     bool bShowHelp = true;
 private:
     UPROPERTY() TObjectPtr<UCameraComponent> Camera;
     UPROPERTY() TObjectPtr<USkeletalMeshComponent> FootAvatar;
+    UPoseableMeshComponent* DriverAvatar = nullptr;
     UPROPERTY() TObjectPtr<UMudAudio> Audio;
     UPROPERTY() TObjectPtr<AMudTerrain> Terrain;
     UPROPERTY() TArray<AMudMachine*> Fleet;
@@ -102,6 +106,10 @@ private:
     TArray<double> BenchmarkFrames;
     TArray<double> BenchmarkSoilTimes;
     TArray<int32> BenchmarkActiveCells;
+    bool bPauseMenuOpen = false;
+    void TogglePauseMenu();
+    void ClosePauseMenu();
+    void ClickPauseMenu();
     void Step(double Dt, const FVector2D& Hydraulics, const MachineMotion::HydraulicInput& Mouse);
     void UpdateCamera(float Dt = 0);
     void InitializeFootAvatar();
@@ -161,6 +169,7 @@ private:
     void ToggleFullscreen();
     void Quit();
     void Notify(const FString& Text);
+    void UpdateDriverAvatar(const AMudMachine* Machine);
 };
 UCLASS()
 class AMudHUD : public AHUD

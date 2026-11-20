@@ -20,6 +20,7 @@
 #include "ProceduralMeshComponent.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "RunningGear.h"
+#include "SoilDraft.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 
@@ -148,6 +149,7 @@ bool AMudTerrain::Initialize()
     for (int32 Cell = 0; Cell < Original.Num(); ++Cell)
         Original[Cell] = FMath::Lerp(Minimum, Maximum, Readings[Cell] / 65535.0);
     Heights = Original;
+    UE_LOG(LogTemp,Display,TEXT("World data loaded: %s, %d x %d samples from %s"),*WorldId,Samples,Samples,*Folder);
     SurfaceHalfSamples.Reset();
     SoilFlow.Reset(Samples);
     Start = ReadPosition(*Data->GetObjectField(TEXT("start")));
@@ -311,12 +313,13 @@ double AMudTerrain::Height(FVector2D XY) const
 
 double AMudTerrain::SurfaceSample(int32 X, int32 Y) const
 {
-    const int32 FineSize = Samples * 2 - 1;
+    constexpr int R=TerrainSurface::Refinement;
+    const int32 FineSize = (Samples-1)*R+1;
     X = FMath::Clamp(X, 0, FineSize-1); Y = FMath::Clamp(Y, 0, FineSize-1);
-    if ((X % 2) == 0 && (Y % 2) == 0) return Heights[Index(X/2,Y/2)];
+    if ((X % R) == 0 && (Y % R) == 0) return Heights[Index(X/R,Y/R)];
     const int32 Key = Y * FineSize + X;
     if (const float* Cached = SurfaceHalfSamples.Find(Key)) return *Cached;
-    const float Value = TerrainSurface::Reconstruct(X * 0.5, Y * 0.5, [this](int I, int J)
+    const float Value = TerrainSurface::Reconstruct(X * TerrainSurface::Spacing, Y * TerrainSurface::Spacing, [this](int I, int J)
     { return Heights[Index(FMath::Clamp(I,0,Samples-1), FMath::Clamp(J,0,Samples-1))]; });
     SurfaceHalfSamples.Add(Key, Value);
     return Value;
@@ -324,17 +327,18 @@ double AMudTerrain::SurfaceSample(int32 X, int32 Y) const
 
 double AMudTerrain::MeshHeight(FVector2D XY, FVector* SurfaceNormal) const
 {
-    const double X = FMath::Clamp(XY.X*2, 0.0, (Samples-1)*2.0);
-    const double Y = FMath::Clamp(XY.Y*2, 0.0, (Samples-1)*2.0);
-    const int32 I = FMath::Min(FMath::FloorToInt(X), (Samples-1)*2-1);
-    const int32 J = FMath::Min(FMath::FloorToInt(Y), (Samples-1)*2-1);
+    constexpr int R=TerrainSurface::Refinement;
+    const double X = FMath::Clamp(XY.X*R, 0.0, double((Samples-1)*R));
+    const double Y = FMath::Clamp(XY.Y*R, 0.0, double((Samples-1)*R));
+    const int32 I = FMath::Min(FMath::FloorToInt(X), (Samples-1)*R-1);
+    const int32 J = FMath::Min(FMath::FloorToInt(Y), (Samples-1)*R-1);
     const double U = X-I, V = Y-J;
     const double SW = SurfaceSample(I,J), SE = SurfaceSample(I+1,J);
     const double NW = SurfaceSample(I,J+1), NE = SurfaceSample(I+1,J+1);
     if (SurfaceNormal)
     {
-        const double DX = (U+V <= 1 ? SE-SW : NE-NW)*2;
-        const double DY = (U+V <= 1 ? NW-SW : NE-SE)*2;
+        const double DX = (U+V <= 1 ? SE-SW : NE-NW)*R;
+        const double DY = (U+V <= 1 ? NW-SW : NE-SE)*R;
         *SurfaceNormal = FVector(-DX,-DY,1).GetSafeNormal();
     }
     return TerrainSurface::Triangle(SW,SE,NW,NE,U,V);
@@ -488,7 +492,9 @@ Earthwork::Column AMudTerrain::OriginalColumn(int32 Cell) const
     {
         const Material Type = XY.X < 190 ? Material::Soil : XY.X < 230 ? Material::Sand :
             XY.X < 270 ? Material::Clay : XY.X < 300 ? Material::Gravel : Material::Rock;
-        return {Original[Cell] - 5.0, {{Material::Rock, 2.0}, {Type, 3.0}}};
+        Column Result{Original[Cell] - 5.0, {{Material::Rock, 2.0}, {Type, 3.0}}};
+        for(auto& Layer:Result.Layers)if(Layer.Type==Material::Rock)Layer.Loose=false;
+        return Result;
     }
     if(!WorldId.IsEmpty())
     {
@@ -497,10 +503,15 @@ Earthwork::Column AMudTerrain::OriginalColumn(int32 Cell) const
             FMath::Square((Original[Index(X,FMath::Min(Y+1,Samples-1))]-Original[Index(X,FMath::Max(Y-1,0))])*.5));
         Material Type=Slope>.85?Material::Rock:Material::Soil;double Depth=Type==Material::Rock?0:2.2;
         for(const auto& R:Geology)if(FVector2D((XY.X-R.XY.X)/R.Radii.X,(XY.Y-R.XY.Y)/R.Radii.Y).SizeSquared()<1){Type=R.Type;Depth=R.Depth;}
+        // Weathered shelves retain actual soil over bedrock; exposed rock follows
+        // the original slope, not the circular extent of a geology marker.
+        if(WorldId.StartsWith(TEXT("earthworks-v4-"))&&Type==Material::Rock&&Slope<.90){Type=Material::Soil;Depth=.45;}
         double Deposit=0;Material Cover=Material::Soil;
         for(const auto& P:Piles){const double D=P.Height*(1-FVector2D::Distance(P.Center,XY)/P.Radius);if(D>0){Deposit=D;Cover=P.Material;break;}}
         const double ColumnDepth=FMath::Max(32.0,Depth+8.0);
-        Column Result{Original[Cell]-Deposit-ColumnDepth,{}};Result.Add(Material::Rock,ColumnDepth-Depth);Result.Add(Type,Depth);Result.Add(Cover,Deposit);return Result;
+        Column Result{Original[Cell]-Deposit-ColumnDepth,{}};Result.Add(Material::Rock,ColumnDepth-Depth);Result.Add(Type,Depth);
+        for(auto& Layer:Result.Layers)if(Layer.Type==Material::Rock)Layer.Loose=false;
+        Result.Add(Cover,Deposit);return Result;
     }
     for (const FMudPile& Pile : Piles)
     {
@@ -536,10 +547,11 @@ void AMudTerrain::UpdateCell(int32 Cell, double WorkDelta)
 
 void AMudTerrain::DirtyCell(int32 Cell)
 {
-    const int32 CX = Cell % Samples, CY = Cell / Samples, FineSize = Samples*2-1;
-    for (int32 Y = FMath::Max(0,CY*2-4); Y <= FMath::Min(FineSize-1,CY*2+4); ++Y)
-        for (int32 X = FMath::Max(0,CX*2-4); X <= FMath::Min(FineSize-1,CX*2+4); ++X)
-            if (X%2 || Y%2) SurfaceHalfSamples.Remove(Y*FineSize+X);
+    constexpr int R=TerrainSurface::Refinement;
+    const int32 CX = Cell % Samples, CY = Cell / Samples, FineSize = (Samples-1)*R+1;
+    for (int32 Y = FMath::Max(0,CY*R-2*R); Y <= FMath::Min(FineSize-1,CY*R+2*R); ++Y)
+        for (int32 X = FMath::Max(0,CX*R-2*R); X <= FMath::Min(FineSize-1,CX*R+2*R); ++X)
+            if (X%R || Y%R) SurfaceHalfSamples.Remove(Y*FineSize+X);
     if (const int32* Plant = PlantByCell.Find(Cell))
         DirtyPlants.Add(*Plant);
     const int32 X = Cell % Samples, Y = Cell / Samples;
@@ -863,6 +875,35 @@ void AMudTerrain::ApplyFill(const TArray<TPair<int32, double>>& Area, const Eart
             TrackWear.Remove(Sample.Key);
         UpdateCell(Sample.Key, Share.Volume());
     }
+}
+
+double AMudTerrain::YieldBody(FVector2D Center,FVector2D Across,FVector2D Reach,double Plane,FVector2D Slopes,double WorkKJ)
+{
+    if(WorkKJ<=Epsilon)return 0;
+    const auto Area=ToolFootprint(Center,Across,Reach,true);
+    const FVector2D Forward(Across.Y,-Across.X);
+    const auto Bottom=[&](int Cell){const FVector2D D=FVector2D(Cell%Samples,Cell/Samples)-Center;
+        return Plane+FVector2D::DotProduct(D,Across)*Slopes.X+FVector2D::DotProduct(D,Forward)*Slopes.Y;};
+    double Total=0;for(const auto& Contact:Area)if(Heights[Contact.Key]>Bottom(Contact.Key)+.001)Total+=Contact.Value;
+    Load Displaced;const double Budget=WorkKJ;double Used=0;
+    for(const auto& Contact:Area)
+    {
+        const int Cell=Contact.Key;const FVector2D XY(Cell%Samples,Cell/Samples),D=XY-Center;
+        const double Floor=Plane+FVector2D::DotProduct(D,Across)*Slopes.X+FVector2D::DotProduct(D,Forward)*Slopes.Y;
+        if(Heights[Cell]<=Floor+.001)continue;
+        double Share=Budget*Contact.Value/FMath::Max(Epsilon,Total),Left=Share;
+        const auto Cut=SoilDraft::DisplaceBelow(Edit(Cell),Floor,Wetness(XY),Left);
+        Displaced.Receive(Cut);Used+=Share-Left;
+        if(Cut.Volume()>Epsilon)UpdateCell(Cell,-Cut.Volume());
+    }
+    // Retain every reference cubic metre on the shoulders, outside the hull.
+    // The active soil solver subsequently settles the windrows.
+    if(Displaced.Volume()>Epsilon)
+    {
+        Spread(Center-Across*(Reach.X+1.15),Across,{.65,Reach.Y},Displaced.Take(Displaced.Volume()*.5));
+        Spread(Center+Across*(Reach.X+1.15),Across,{.65,Reach.Y},Displaced);
+    }
+    return Used;
 }
 
 double AMudTerrain::CompactBody(FVector2D Center,FVector2D Across,FVector2D Reach,double Plane,FVector2D Slopes,
@@ -1237,7 +1278,8 @@ void AMudTerrain::BuildTile(int32 Id, int32 Step)
 {
     TRACE_CPUPROFILER_EVENT_SCOPE(MudRebuildTerrainTile);
     const int32 X0 = (Id % TilesPerSide)*TileSize, Y0 = (Id / TilesPerSide)*TileSize;
-    const double Spacing = Step == 0 ? 0.5 : Step;
+    constexpr double Detail=TerrainSurface::Spacing;
+    const double Spacing = Step == 0 ? Detail : Step;
     const int32 Cells = FMath::RoundToInt(TileSize/Spacing), Edge = Cells+1;
     TArray<FVector> Vertices, Normals;
     TArray<int32> Triangles;
@@ -1313,8 +1355,8 @@ void AMudTerrain::BuildTile(int32 Id, int32 Step)
             FinishMasks[I]=V.UV1; MineralMasks[I]=V.UV2; RockMasks[I]=V.UV3;
             Colors[I]=V.Color.ReinterpretAsLinear(); Tangents[I]=V.Tangent;
         }
-        for (int32 Y=Region->Min.Y*2; Y<=FMath::Min(Edge-1,Region->Max.Y*2); ++Y)
-            for (int32 X=Region->Min.X*2; X<=FMath::Min(Edge-1,Region->Max.X*2); ++X)
+        for (int32 Y=Region->Min.Y*TerrainSurface::Refinement; Y<=FMath::Min(Edge-1,Region->Max.Y*TerrainSurface::Refinement); ++Y)
+            for (int32 X=Region->Min.X*TerrainSurface::Refinement; X<=FMath::Min(Edge-1,Region->Max.X*TerrainSurface::Refinement); ++X)
                 Add(X*Spacing,Y*Spacing,Y*Edge+X);
         Existing->UpdateMeshSection_LinearColor(0,Vertices,Normals,UV,FinishMasks,MineralMasks,RockMasks,Colors,Tangents,false);
         DirtyRegions.Remove(Id); return;
@@ -1326,16 +1368,16 @@ void AMudTerrain::BuildTile(int32 Id, int32 Step)
             const int32 SW=Y*Edge+X, SE=SW+1, NW=SW+Edge, NE=NW+1;
             if (Step==0 || (X>0 && Y>0 && X<Cells-1 && Y<Cells-1))
             { Triangles.Append({SW,NW,SE,SE,NW,NE}); continue; }
-            // Every LOD shares the exact same half-metre boundary. No skirts or T-junctions.
+            // Every LOD shares the exact same quarter-metre boundary. No skirts or T-junctions.
             TArray<int32,TInlineAllocator<40>> Ring;
             Ring.Add(SW);
-            if (X==0) for (double T=0.5; T<Spacing; T+=0.5) Ring.Add(Add(X*Spacing,Y*Spacing+T));
+            if (X==0) for (double T=Detail; T<Spacing; T+=Detail) Ring.Add(Add(X*Spacing,Y*Spacing+T));
             Ring.Add(NW);
-            if (Y==Cells-1) for (double T=0.5; T<Spacing; T+=0.5) Ring.Add(Add(X*Spacing+T,(Y+1)*Spacing));
+            if (Y==Cells-1) for (double T=Detail; T<Spacing; T+=Detail) Ring.Add(Add(X*Spacing+T,(Y+1)*Spacing));
             Ring.Add(NE);
-            if (X==Cells-1) for (double T=Spacing-0.5; T>0; T-=0.5) Ring.Add(Add((X+1)*Spacing,Y*Spacing+T));
+            if (X==Cells-1) for (double T=Spacing-Detail; T>0; T-=Detail) Ring.Add(Add((X+1)*Spacing,Y*Spacing+T));
             Ring.Add(SE);
-            if (Y==0) for (double T=Spacing-0.5; T>0; T-=0.5) Ring.Add(Add(X*Spacing+T,Y*Spacing));
+            if (Y==0) for (double T=Spacing-Detail; T>0; T-=Detail) Ring.Add(Add(X*Spacing+T,Y*Spacing));
             const int32 Center=Add((X+0.5)*Spacing,(Y+0.5)*Spacing);
             for (int32 I=0; I<Ring.Num(); ++I) Triangles.Append({Center,Ring[I],Ring[(I+1)%Ring.Num()]});
         }
@@ -1705,6 +1747,9 @@ TSharedRef<FJsonObject> AMudTerrain::SaveTerrain() const
         TArray<TSharedPtr<FJsonValue>> Packing;
         for (const auto& Layer : Entry.Value.Layers) Packing.Add(MakeShared<FJsonValueNumber>(Layer.Packing));
         Row->SetArrayField(TEXT("packing"), Packing);
+        TArray<TSharedPtr<FJsonValue>> Loose;
+        for(const auto& Layer:Entry.Value.Layers)Loose.Add(MakeShared<FJsonValueBoolean>(Layer.Loose));
+        Row->SetArrayField(TEXT("loose"),Loose);
         if (const float* Finish = WorkFinish.Find(Entry.Key))
             Row->SetNumberField(TEXT("finish"), *Finish);
         Edits.Add(MakeShared<FJsonValueObject>(Row));
@@ -1813,6 +1858,8 @@ bool AMudTerrain::RestoreTerrain(const TSharedPtr<FJsonObject>& Data)
         }
         Column.Layers.clear();
         const TArray<TSharedPtr<FJsonValue>>* Packing = nullptr;
+        const TArray<TSharedPtr<FJsonValue>>* Loose = nullptr;
+        if((*Row)->HasField(TEXT("loose"))&&(!(*Row)->TryGetArrayField(TEXT("loose"),Loose)||Loose->Num()!=JsonLayers->Num()/2))return false;
         if ((*Row)->HasField(TEXT("packing")) && (!(*Row)->TryGetArrayField(TEXT("packing"), Packing) || Packing->Num() != JsonLayers->Num() / 2))
             return false;
         for (int32 I = 0; I < JsonLayers->Num(); I += 2)
@@ -1825,7 +1872,9 @@ bool AMudTerrain::RestoreTerrain(const TSharedPtr<FJsonObject>& Data)
             double Packed = 0;
             if (Packing && (!(*Packing)[I / 2]->TryGetNumber(Packed) || !FMath::IsFinite(Packed) || Packed < 0 || Packed > 1))
                 return false;
-            if (Volume > 0) Column.Layers.push_back({static_cast<Material>(static_cast<uint8>(Type)), Volume, Packed});
+            bool Mobile=true;
+            if(Loose&&!(*Loose)[I/2]->TryGetBool(Mobile))return false;
+            if (Volume > 0) Column.Layers.push_back({static_cast<Material>(static_cast<uint8>(Type)), Volume, Packed, Mobile});
         }
         Restored.Add(Cell, MoveTemp(Column));
     }

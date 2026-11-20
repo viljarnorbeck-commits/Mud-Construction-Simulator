@@ -9,7 +9,7 @@
 using namespace Earthwork;
 int main()
 {
-    std::ifstream File("world/earthworks-42/acceptance-profile.csv");assert(File.good());
+    std::ifstream File("world/42/acceptance-profile.csv");assert(File.good());
     std::map<std::pair<int,int>,Column> Ground;
     std::string Line;std::getline(File,Line);
     while(std::getline(File,Line)) {

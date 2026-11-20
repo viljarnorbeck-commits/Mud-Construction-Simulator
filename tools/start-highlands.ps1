@@ -2,7 +2,7 @@
 param(
     [ValidateSet('Play','Validate','Regression','Benchmark')][string]$Mode='Play',
     [string]$EngineRoot='C:/Program Files/Epic Games/UE_5.7',
-    [ValidateSet('earthworks-42','highlands-42')][string]$World='earthworks-42'
+    [ValidateSet('42','earthworks-42','highlands-42')][string]$World='42'
 )
 $ErrorActionPreference='Stop'
 $root=(Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path

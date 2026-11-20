@@ -2,6 +2,7 @@
 
 #include "Camera/CameraComponent.h"
 #include "Components/InputComponent.h"
+#include "Components/PoseableMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Dom/JsonObject.h"
 #include "Engine/Canvas.h"
@@ -632,6 +633,10 @@ AMudOperator::AMudOperator()
     FootAvatar->SetVisibility(false);
     FootAvatar->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickPoseWhenRendered;
     FootAvatar->AddTickPrerequisiteActor(this);
+    DriverAvatar = CreateDefaultSubobject<UPoseableMeshComponent>(TEXT("DriverAvatar"));
+    DriverAvatar->SetupAttachment(RootComponent);
+    DriverAvatar->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    DriverAvatar->SetVisibility(false);
     Audio = CreateDefaultSubobject<UMudAudio>(TEXT("ValleyAudio"));
 }
 
@@ -664,6 +669,18 @@ void AMudOperator::BeginPlay()
         bInitializeFailed=true; // Isolated rendering fixture; user progress is never loaded/saved.
         GetWorld()->SpawnActor<AMudMaterialReview>()->Initialize(*Terrain,Fleet);
         return;
+    }
+    if(FParse::Param(FCommandLine::Get(),TEXT("MudTerrainAudit")))
+    {
+        bInitializeFailed=true; // No profile load or autosave during terrain diagnostics.
+        bool Passed=true;
+        for(const FVector2D Point : {XY(Terrain->Start),FVector2D(236,1640),FVector2D(337,1665),FVector2D(535,610),FVector2D(650,1320)})
+            Passed=Terrain->ValidateSurfaceRendering(Point)&&Passed;
+        FString Report;
+        if(FParse::Value(FCommandLine::Get(),TEXT("MudSmokeReport="),Report))
+            Passed=FFileHelper::SaveStringToFile(Passed?TEXT("passed"):TEXT("failed"),*Report)&&Passed;
+        UE_LOG(LogTemp,Display,TEXT("Natural terrain mesh/collision-height/LOD audit: %d"),Passed);
+        FPlatformMisc::RequestExitWithStatus(false,Passed?0:1);return;
     }
     if(FParse::Param(FCommandLine::Get(),TEXT("MudWorldValidation")))
     {
@@ -772,6 +789,7 @@ void AMudOperator::BeginPlay()
 
 void AMudOperator::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+    ClosePauseMenu();
     if (EndPlayReason == EEndPlayReason::Quit && NextAutosave > 0 && !bProtectSave)
         WriteProgress();
     Super::EndPlay(EndPlayReason);
@@ -935,6 +953,7 @@ void AMudOperator::UpdateCamera(float Dt)
 {
     auto* Machine = GetMachine();
     FootAvatar->SetVisibility(!Machine);
+    UpdateDriverAvatar(Machine);
     if (!Machine)
     {
         UpdateFootView(Dt);
@@ -1033,8 +1052,9 @@ void AMudOperator::MoveMouseX(float Value)
 
 void AMudOperator::MoveMouseY(float Value)
 {
-    if (Value != 0 && !ApplyMouseDrag(0, Value))
-        PanView(0, Value * MachineMotion::MouseLookDegreesPerCount);
+    const double Vertical = -static_cast<double>(Value);
+    if (Value != 0 && !ApplyMouseDrag(0, Vertical))
+        PanView(0, Vertical * MachineMotion::MouseLookDegreesPerCount);
 }
 
 bool AMudOperator::ApplyMouseDrag(double X, double Y)
@@ -1336,7 +1356,7 @@ FString AMudOperator::MissionText() const
         return TEXT("Build a gravel road at a marked ford. Level it with the dozer. Press 9 to survey.");
     if (bDelivery)
         return TEXT("Deliver the loaded truck to the red marker.");
-    if (Terrain->GetWorldId().StartsWith(TEXT("earthworks-v3-")))
+    if (Terrain->GetWorldId().StartsWith(TEXT("earthworks-v")))
         return TEXT("Cut a route through the earth bank, fill the ravine and reinforce soft ground. Load the truck at the yellow yard; deliver to red.");
     return TEXT("Prepare a crossing. Bring the truck to the yellow yard with at least 18 m3.");
 }
@@ -1709,7 +1729,11 @@ void AMudOperator::SetupPlayerInputComponent(UInputComponent* Input)
     Input->BindAction(TEXT("Performance"), IE_Pressed, this, &AMudOperator::PerformanceMode);
     Input->BindAction(TEXT("Quality"), IE_Pressed, this, &AMudOperator::QualityMode);
     Input->BindAction(TEXT("Fullscreen"), IE_Pressed, this, &AMudOperator::ToggleFullscreen);
-    Input->BindAction(TEXT("Quit"), IE_Pressed, this, &AMudOperator::Quit);
+    // Bind the physical key so older saved "Quit" mappings cannot bypass the menu.
+    Input->BindKey(EKeys::Escape, IE_Pressed, this, &AMudOperator::TogglePauseMenu).bExecuteWhenPaused = true;
+    auto& MenuClick = Input->BindKey(EKeys::LeftMouseButton, IE_Pressed, this, &AMudOperator::ClickPauseMenu);
+    MenuClick.bExecuteWhenPaused = true;
+    MenuClick.bConsumeInput = false;
 }
 
 void AMudHUD::DrawHUD()
@@ -1737,6 +1761,28 @@ void AMudHUD::DrawHUD()
         DrawText(Value, Color, X * Scale, Y * Scale, GEngine->GetSmallFont(), Scale * Size, false);
     };
 
+    if (Operator->IsPauseMenuOpen())
+    {
+        Rect(FLinearColor(0, 0, 0, 0.65f), 0, 0, W, H);
+        const float CenterX = W * 0.5f, CenterY = H * 0.5f;
+        Rect(Panel, CenterX - 210, CenterY - 180, 420, 360);
+        Label(TEXT("Pausat"), Gold, CenterX - 180, CenterY - 148, 2.2f);
+        float MouseX = -1, MouseY = -1;
+        GetOwningPlayerController()->GetMousePosition(MouseX, MouseY);
+        const TCHAR* Buttons[] = {TEXT("Fortsätt"), TEXT("Spara världen"), TEXT("Spara och avsluta")};
+        for (int32 I = 0; I < UE_ARRAY_COUNT(Buttons); ++I)
+        {
+            const FBox2D Bounds = AMudOperator::PauseButtonBounds(FVector2D(Canvas->SizeX, Canvas->SizeY), I);
+            const bool bHover = Bounds.IsInside(FVector2D(MouseX, MouseY));
+            Rect(bHover ? FLinearColor(0.25f, 0.37f, 0.29f) : FLinearColor(0.12f, 0.19f, 0.16f),
+                Bounds.Min.X / Scale, Bounds.Min.Y / Scale, Bounds.GetSize().X / Scale, Bounds.GetSize().Y / Scale);
+            Label(Buttons[I], bHover ? Gold : Text, Bounds.Min.X / Scale + 18, Bounds.Min.Y / Scale + 17, 1.2f);
+        }
+        Label(Operator->StatusText().IsEmpty() ? TEXT("Esc för att fortsätta") : Operator->StatusText(),
+            Muted, CenterX - 180, CenterY + 140, 0.94f);
+        return;
+    }
+
     if (!bInCab || Operator->bShowMap)
     {
         Rect(Panel, 22, 22, 600, 80);
@@ -1747,6 +1793,56 @@ void AMudHUD::DrawHUD()
     }
     if (!Terrain)
         return;
+
+    const FLinearColor ReadyColor(0.32f, 0.86f, 0.43f);
+    const FLinearColor DeepColor(0.35f, 0.72f, 0.98f);
+    if (Operator->bShowMap && Terrain->HasRoadContract())
+    {
+        const FVector2D Here = Operator->GetPosition();
+        const float CardWidth = FMath::Clamp(W * 0.44f - 32.f, 258.f, 408.f);
+        float Y = 113.f;
+        for (int32 I = 0; I < Terrain->Fords.Num(); ++I)
+        {
+            const auto* Road = Terrain->GetRoadSurvey(I);
+            if (!Road || Road->Sections.IsEmpty())
+                continue;
+
+            const auto Color = Road->IsReady() ? ReadyColor : Text;
+            const TCHAR* Name = Terrain->Fords[I].Y > Terrain->GetWorldSize() * 0.5 ? TEXT("South ford") : TEXT("North ford");
+            Rect(Panel, 22, Y, CardWidth, 130);
+            Label(FString::Printf(TEXT("%s   %d%%"), Name, Road->Progress()), Color, 38, Y + 10, 1.10);
+            if (Road->IsReady())
+                Label(TEXT("Ready for the loaded truck"), ReadyColor, 38, Y + 34, 0.94);
+            else
+            {
+                Label(FString::Printf(TEXT("Raise streambed   %d m"), Road->Deep), Road->Deep ? DeepColor : Muted, 38, Y + 34, 0.94);
+                Label(FString::Printf(TEXT("Add gravel   %d m"), Road->Soft), Road->Soft ? Gold : Muted, 38, Y + 51, 0.94);
+                Label(FString::Printf(TEXT("Level with dozer   %d m"), Road->Rough), Road->Rough ? Red : Muted, 38, Y + 68, 0.94);
+                if (Road->Fill > 0)
+                    Label(FString::Printf(TEXT("~%.1f m3 fill"), Road->Fill), Muted, 22 + CardWidth - 96, Y + 10, 0.90);
+            }
+
+            const float Left = 56.f, StripWidth = CardWidth - 68.f;
+            const float Step = StripWidth / Road->Sections.Num();
+            for (int32 S = 0; S < Road->Sections.Num(); ++S)
+            {
+                const auto& Section = Road->Sections[S];
+                const float X = Left + S * Step;
+                Rect(Section.bDeep ? DeepColor : Panel, X, Y + 92, Step, 5);
+                Rect(Section.bSoft ? Gold : Panel, X, Y + 98, Step, 5);
+                Rect(Section.bRough ? Red : Panel, X, Y + 104, Step, 5);
+                if (Section.IsReady())
+                    Rect(ReadyColor, X, Y + 92, Step, 17);
+            }
+            Label(TEXT("W"), Muted, 38, Y + 93, 0.85);
+            Label(TEXT("E"), Muted, Left + StripWidth + 6, Y + 93, 0.85);
+            const FVector2D Offset = Here - Road->Start;
+            if (FMath::Abs(Offset.Y) < 20 && Offset.X >= -0.5 && Offset.X < Road->Sections.Num() - 0.5)
+                Rect(FLinearColor::White, Left + (Offset.X + 0.5) * Step - 1, Y + 111, 2, 7);
+            Y += 138;
+        }
+    }
+
     if (!Machine)
     {
         if (Operator->bShowHelp)
@@ -1755,88 +1851,92 @@ void AMudHUD::DrawHUD()
             Label(TEXT("WASD  Move   Shift  Sprint   Space  Jump"), Text, W - 336, H - 67, 0.91);
             Label(TEXT("E  Enter   Tab  Switch vehicle   Wheel  Zoom"), Muted, W - 336, H - 45, 0.91);
         }
-        return;
+        if (!Operator->bShowMap)
+            return;
     }
 
-    const auto Status = Operator->StatusText();
-    if (bInCab && !Operator->bShowMap)
+    if (Machine)
     {
-        Rect(Panel, 22, H - 88, 295, 66);
-        const bool bEarthmover = Machine->Kind == EMudMachine::Excavator ||
-            Machine->Kind == EMudMachine::Dozer || Machine->Kind == EMudMachine::Loader;
-        const FVector Tip = Machine->ToolPoint();
-        const double Clearance = Tip.Z - Terrain->Height(XY(Tip));
-        const FString WorkReading = bEarthmover ?
-            FString::Printf(TEXT("Edge vs ground  %+.2f m"), Clearance) :
-            FString::Printf(TEXT("Bed  %.1f / %.1f m3"), Machine->Cargo.Volume(), Machine->Capacity());
-        Label(WorkReading, Text, 35, H - 79);
-        Label(Machine->ToolDescription(), Machine->IsMovingEarth() ? Gold : Muted, 35, H - 58, 0.94);
-        if (Operator->bShowHelp)
+        const auto Status = Operator->StatusText();
+        if (bInCab && !Operator->bShowMap)
         {
-            Label(ArrowHelp(*Machine), Muted, 35, H - 39, 0.85);
+            Rect(Panel, 22, H - 88, 295, 66);
+            const bool bEarthmover = Machine->Kind == EMudMachine::Excavator ||
+                Machine->Kind == EMudMachine::Dozer || Machine->Kind == EMudMachine::Loader;
+            const FVector Tip = Machine->ToolPoint();
+            const double Clearance = Tip.Z - Terrain->Height(XY(Tip));
+            const FString WorkReading = bEarthmover ?
+                FString::Printf(TEXT("Edge vs ground  %+.2f m"), Clearance) :
+                FString::Printf(TEXT("Bed  %.1f / %.1f m3"), Machine->Cargo.Volume(), Machine->Capacity());
+            Label(WorkReading, Text, 35, H - 79);
+            Label(Machine->ToolDescription(), Machine->IsMovingEarth() ? Gold : Muted, 35, H - 58, 0.94);
+            if (Operator->bShowHelp)
+            {
+                Label(ArrowHelp(*Machine), Muted, 35, H - 39, 0.85);
+            }
+            if (!Status.IsEmpty())
+            {
+                Rect(Panel, 22, H - 127, 495, 31);
+                Label(Status, Gold, 35, H - 120);
+            }
+            return;
         }
+
+        Rect(Panel, 22, H - 154, 322, 132);
+        Label(Machine->Name(), Text, 38, H - 143, 1.24);
+        Label(Machine->ToolDescription(), Machine->IsMovingEarth() ? Gold : Muted, 38, H - 119);
+        Label(ArrowHelp(*Machine), Text, 38, H - 99, 0.91);
+        Label(FString::Printf(TEXT("%02.0f km/h   |   %02.0f%% grip   |   %4.1f t payload"),
+            FMath::Abs(Machine->Speed) * 3.6, Machine->Grip * 100, Machine->Cargo.Mass()), Text, 38, H - 76);
+        Rect(FLinearColor(0.13, 0.19, 0.17), 38, H - 48, 138, 6);
+        Rect(Gold, 38, H - 48, 138 * Machine->Cargo.Volume() / Machine->Capacity(), 6);
+        Label(FString::Printf(TEXT("%.1f / %.1f m3"), Machine->Cargo.Volume(), Machine->Capacity()), Text, 190, H - 55);
         if (!Status.IsEmpty())
         {
-            Rect(Panel, 22, H - 127, 495, 31);
-            Label(Status, Gold, 35, H - 120);
+            Rect(Panel, 22, H - 196, 495, 32);
+            Label(Status, Gold, 36, H - 188);
         }
-        return;
-    }
 
-    Rect(Panel, 22, H - 154, 322, 132);
-    Label(Machine->Name(), Text, 38, H - 143, 1.24);
-    Label(Machine->ToolDescription(), Machine->IsMovingEarth() ? Gold : Muted, 38, H - 119);
-    Label(ArrowHelp(*Machine), Text, 38, H - 99, 0.91);
-    Label(FString::Printf(TEXT("%02.0f km/h   |   %02.0f%% grip   |   %4.1f t payload"),
-        FMath::Abs(Machine->Speed) * 3.6, Machine->Grip * 100, Machine->Cargo.Mass()), Text, 38, H - 76);
-    Rect(FLinearColor(0.13, 0.19, 0.17), 38, H - 48, 138, 6);
-    Rect(Gold, 38, H - 48, 138 * Machine->Cargo.Volume() / Machine->Capacity(), 6);
-    Label(FString::Printf(TEXT("%.1f / %.1f m3"), Machine->Cargo.Volume(), Machine->Capacity()), Text, 190, H - 55);
-    if (!Status.IsEmpty())
-    {
-        Rect(Panel, 22, H - 196, 495, 32);
-        Label(Status, Gold, 36, H - 188);
-    }
-
-    if (!Operator->bShowMap && (Machine->bTool || Machine->IsTipping() ||
-        (Operator->bShowHelp && (Machine->Kind == EMudMachine::Excavator || Machine->Kind == EMudMachine::Loader))))
-    {
-        const FVector Lip = Machine->ToolPoint();
-        const FVector Ground(Lip.X, Lip.Y, Terrain->Height(XY(Lip)) + 0.035);
-        FVector2D Pixel;
-        if (const auto* PC = GetOwningPlayerController(); PC && PC->ProjectWorldLocationToScreen(Ground * 100, Pixel))
+        if (!Operator->bShowMap && (Machine->bTool || Machine->IsTipping() ||
+            (Operator->bShowHelp && (Machine->Kind == EMudMachine::Excavator || Machine->Kind == EMudMachine::Loader))))
         {
-            const FLinearColor Indicator = Machine->IsMovingEarth() ? FLinearColor(0.55, 0.89, 0.56) : Gold;
-            const double Radius = 7 * Scale;
-            DrawLine(Pixel.X - Radius, Pixel.Y, Pixel.X, Pixel.Y - Radius, Indicator, 1.5 * Scale);
-            DrawLine(Pixel.X, Pixel.Y - Radius, Pixel.X + Radius, Pixel.Y, Indicator, 1.5 * Scale);
-            DrawLine(Pixel.X + Radius, Pixel.Y, Pixel.X, Pixel.Y + Radius, Indicator, 1.5 * Scale);
-            DrawLine(Pixel.X, Pixel.Y + Radius, Pixel.X - Radius, Pixel.Y, Indicator, 1.5 * Scale);
+            const FVector Lip = Machine->ToolPoint();
+            const FVector Ground(Lip.X, Lip.Y, Terrain->Height(XY(Lip)) + 0.035);
+            FVector2D Pixel;
+            if (const auto* PC = GetOwningPlayerController(); PC && PC->ProjectWorldLocationToScreen(Ground * 100, Pixel))
+            {
+                const FLinearColor Indicator = Machine->IsMovingEarth() ? FLinearColor(0.55, 0.89, 0.56) : Gold;
+                const double Radius = 7 * Scale;
+                DrawLine(Pixel.X - Radius, Pixel.Y, Pixel.X, Pixel.Y - Radius, Indicator, 1.5 * Scale);
+                DrawLine(Pixel.X, Pixel.Y - Radius, Pixel.X + Radius, Pixel.Y, Indicator, 1.5 * Scale);
+                DrawLine(Pixel.X + Radius, Pixel.Y, Pixel.X, Pixel.Y + Radius, Indicator, 1.5 * Scale);
+                DrawLine(Pixel.X, Pixel.Y + Radius, Pixel.X - Radius, Pixel.Y, Indicator, 1.5 * Scale);
+            }
+        }
+
+        const float FrameMs = Operator->FrameSeconds * 1000;
+        Rect(Panel, W - 188, 22, 166, 30);
+        Label(FString::Printf(TEXT("%.0f FPS   /   %.2f ms"), 1000 / FMath::Max(FrameMs, 0.01f), FrameMs), Muted, W - 174, 29);
+        if (Operator->bShowHelp)
+        {
+            Rect(Panel, W - 368, H - 156, 346, 134);
+            Label(TEXT("WASD  Drive    E  Enter / exit    Tab  Next vehicle"), Text, W - 353, H - 143);
+            const TCHAR* WorkHelp = Machine->Kind == EMudMachine::Excavator ? TEXT("V  Dig    I  Tip    Both mouse buttons: tilt") :
+                (Machine->Kind == EMudMachine::Dozer ? TEXT("I  Spread    J/K  Blade") :
+                    (Machine->Kind == EMudMachine::Loader ? TEXT("Lower bucket and drive into the pile") : TEXT("R  Load at a pile    I  Auto tip")));
+            Label(WorkHelp, Text, W - 353, H - 122);
+            const TCHAR* MouseHelp = Machine->Kind == EMudMachine::Excavator ?
+                TEXT("Hold LMB  Boom / bucket    RMB  Stick / swing") :
+                (Machine->Kind == EMudMachine::Dozer ? TEXT("Hold mouse + drag up / down  Blade") :
+                    (Machine->Kind == EMudMachine::Loader ? TEXT("LMB up/down  Lift    LMB left/right or RMB up/down  Bucket") : TEXT("Mouse  Look around")));
+            Label(MouseHelp, Text, W - 353, H - 101);
+            Label(TEXT("C  Camera     9  Survey     Backspace  Recover"), Text, W - 353, H - 80);
+            Label(TEXT("F5 / F9  Save / load    F7 / F8  Graphics"), Text, W - 353, H - 59);
+            Label(TEXT("F1  Controls     F6  Fullscreen     Esc  Menu"), Muted, W - 353, H - 39);
         }
     }
 
-    const float FrameMs = Operator->FrameSeconds * 1000;
-    Rect(Panel, W - 188, 22, 166, 30);
-    Label(FString::Printf(TEXT("%.0f FPS   /   %.2f ms"), 1000 / FMath::Max(FrameMs, 0.01f), FrameMs), Muted, W - 174, 29);
-    if (Operator->bShowHelp)
-    {
-        Rect(Panel, W - 368, H - 156, 346, 134);
-        Label(TEXT("WASD  Drive    E  Enter / exit    Tab  Next vehicle"), Text, W - 353, H - 143);
-        const TCHAR* WorkHelp = Machine->Kind == EMudMachine::Excavator ? TEXT("V  Dig    I  Tip    Both mouse buttons: tilt") :
-            (Machine->Kind == EMudMachine::Dozer ? TEXT("I  Spread    J/K  Blade") :
-                (Machine->Kind == EMudMachine::Loader ? TEXT("Lower bucket and drive into the pile") : TEXT("R  Load at a pile    I  Auto tip")));
-        Label(WorkHelp, Text, W - 353, H - 122);
-        const TCHAR* MouseHelp = Machine->Kind == EMudMachine::Excavator ?
-            TEXT("Hold LMB  Boom / bucket    RMB  Stick / swing") :
-            (Machine->Kind == EMudMachine::Dozer ? TEXT("Mouse or arrows: lift / angle blade") :
-                (Machine->Kind == EMudMachine::Loader ? TEXT("LMB up/down  Lift    LMB left/right or RMB up/down  Bucket") : TEXT("Mouse  Look around")));
-        Label(MouseHelp, Text, W - 353, H - 101);
-        Label(TEXT("C  Camera     9  Survey     Backspace  Recover"), Text, W - 353, H - 80);
-        Label(TEXT("F5 / F9  Save / load    F7 / F8  Graphics"), Text, W - 353, H - 59);
-        Label(TEXT("F1  Controls     F6  Fullscreen     Esc  Quit"), Muted, W - 353, H - 39);
-    }
-
-    const float MapSize = Operator->bShowMap ? FMath::Min(500.f, H - 230) : 180.f;
+    const float MapSize = Operator->bShowMap ? FMath::Clamp(FMath::Min(H - 230, W * 0.52f - 26), 180.f, 500.f) : 180.f;
     const float MapX = W - MapSize - 22, MapY = 67;
     Rect(Panel, MapX - 2, MapY - 2, MapSize + 4, MapSize + 4);
     if (auto* Overview = Terrain->GetOverview())
@@ -1849,12 +1949,23 @@ void AMudHUD::DrawHUD()
     };
     MapPoint(XY(Terrain->Start), Gold, 6);
     MapPoint(XY(Terrain->Goal), Red, 6);
-    for (const auto Ford : Terrain->Fords)
-        MapPoint(Ford, FLinearColor(0.61, 0.85, 1), 4);
+    for (int32 I = 0; I < Terrain->Fords.Num(); ++I)
+    {
+        const auto* Road = Terrain->GetRoadSurvey(I);
+        const FLinearColor Color = Road && Road->IsReady() ? ReadyColor : DeepColor;
+        if (Operator->bShowMap && Road && !Road->Sections.IsEmpty())
+        {
+            const FVector2D Pixel = Road->Start * (MapSize / Terrain->GetWorldSize()) + FVector2D(MapX, MapY);
+            Rect(Color, Pixel.X, Pixel.Y - 1, Road->Sections.Num() * MapSize / Terrain->GetWorldSize(), 2);
+        }
+        else
+            MapPoint(Terrain->Fords[I], Color, 4);
+    }
     for (const auto* Vehicle : Operator->GetFleet())
         MapPoint(Vehicle->Position, Vehicle == Machine ? FLinearColor::White : Gold, Vehicle == Machine ? 6 : 3);
     if (Operator->bShowMap)
     {
+        MapPoint(Operator->GetPosition(), FLinearColor::White, 6);
         for (const auto& Pile : Terrain->Piles)
         {
             const FVector2D Point = MapPoint(Pile.Center, Text, 5);

@@ -20,15 +20,15 @@ export function landscape(seed) {
     {material:'sand',x:1130,y:1650,radius:23,height:6},
     {material:'crushed-rock',x:1490,y:1250,radius:25,height:9},
     {material:'gravel',x:1620,y:580,radius:20,height:7}].map(p=>({...p,volumeM3:0}));
-  // Thick glacial till remains excavatable even on a vertical-looking face. Explicit rock
-  // outcrops are limited to the distant eastern massif, never inferred from slope.
+  // Excavatable till terraces and localized bedrock outcrops have different slope limits.
   const geology=[{x:1024,y:1024,rx:1600,ry:1600,material:'soil',soilDepth:52},
     {x:260,y:1640,rx:76,ry:245,material:'clay',soilDepth:30},
     ...pits.map(p=>({...p,material:'clay',soilDepth:14})),
     {x:1130,y:1650,rx:130,ry:140,material:'sand',soilDepth:16},
-    {x:1690,y:790,rx:110,ry:165,material:'crushed-rock',soilDepth:48}];
+    {x:1690,y:790,rx:110,ry:165,material:'crushed-rock',soilDepth:48},
+    {x:535,y:610,rx:95,ry:160,material:'crushed-rock',soilDepth:44}];
   const challenges=[
-    {name:'Till escarpment',kind:'cut',x:bankX(1640),y:1640,approach:{x:210,y:1640},end:{x:282,y:1640}},
+    {name:'Eroded till slope',kind:'cut',x:bankX(1640),y:1640,approach:{x:210,y:1640},end:{x:282,y:1640}},
     {name:'Incised ravine',kind:'fill',x:ravineX(1665),y:1665,approach:{x:307,y:1665},end:{x:369,y:1665}},
     {name:'Saturated clay hollow',kind:'reinforce',x:435,y:1540},
     {name:'Northern ravine route',kind:'fill',x:ravineX(1510),y:1510},
@@ -66,24 +66,27 @@ export function landscape(seed) {
     // A continuous sediment terrace and incised drainage immediately outside the machinery yard.
     const local=window(y,1390,1900,65);
     const bank=x-bankX(y);
-    z+=18*smooth(bank/4)*(1-smooth((bank-29)/95))*local;
+    z+=18*smooth((bank+19)/38)*(1-smooth((bank-36)/95))*local;
     const ravine=Math.abs(x-ravineX(y));
-    z-=15*(1-smooth((ravine-3)/7))*local;
+    z-=15*(1-smooth((ravine-2)/25))*local;
     // An isolated remnant of the sediment terrace carries the delivery site. Its
     // continuous eroded margin prevents a flat detour from bypassing all earthwork.
     // Players can cut a ramp anywhere around it or build an embankment from below.
     const remnant=Math.hypot((x-goal.x)/90,(y-goal.y)/120)+
       (noise(x/37+21,y/43-17)-.5)*.07;
-    z+=11*(1-smooth((remnant-1)*30));
+    z+=24*(1-smooth((remnant-.86)/.23));
     // Additional weathered terrace edges across the map offer alternative cut/fill corridors.
-    z+=21*smooth((x-1490-24*Math.sin(y/76))/5)*window(x,1430,1820,100)*window(y,320,1160,90);
+    z+=21*smooth((x-1490-24*Math.sin(y/76)+22)/44)*window(x,1430,1820,100)*window(y,320,1160,90);
     const riverBlend=1-smooth((d-riverWidth(y)*.5)/13);
     const crossing=Math.max(...[820,1560].map(v=>Math.exp(-(((y-v)/18)**2))));
     z=mix(z,riverZ(y)-mix(4.5,1.6,crossing),riverBlend);
     let wet=.1,water=d<riverWidth(y)*.5+10&&z<riverZ(y);
     if(x>=180&&x<=creekEnd) {
       const c=creek(x),dc=Math.abs(y-c.y);
-      const carve=(1-smooth((dc-c.width*.5)/9))*smooth((x-180)/22);
+      // Deep tributaries need valley sides proportional to their incision, not a
+      // fixed nine-metre transition through a two-hundred-metre mountainside.
+      const valleyWidth=Math.max(18,(z-(c.z-c.depth))*1.65);
+      const carve=(1-smooth((dc-c.width*.5)/valleyWidth))*smooth((x-180)/30);
       z=mix(z,Math.min(z,c.z-c.depth),carve);
       wet=Math.max(wet,.85*(1-smooth((dc-c.width*.5)/16)));
       water ||= dc<c.width*.5+4&&z<c.z;

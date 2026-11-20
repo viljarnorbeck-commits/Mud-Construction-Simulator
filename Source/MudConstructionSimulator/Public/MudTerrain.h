@@ -86,6 +86,7 @@ public:
     double MaterialBalance() const;
     double MaterialVolumeBalance() const;
     bool ValidateSurfaceRendering(FVector2D Focus);
+    bool ValidateCollisionQueries(FVector2D Focus);
     bool IsSoilLab() const { return bSoilLab; }
     void SettlePours();
     void Spread(FVector2D XY, FVector2D Across, FVector2D Reach, const Earthwork::Load& Load);
@@ -93,6 +94,7 @@ public:
         double Outward, double Scrub, bool bTracked, double LoadFactor = 1);
     double CompactBody(FVector2D Center,FVector2D Across,FVector2D Reach,double Plane,FVector2D Slopes,
         double PressureKPa,double Dt);
+    double YieldBody(FVector2D Center,FVector2D Across,FVector2D Reach,double Plane,FVector2D Slopes,double WorkKJ);
     void ShowSpill(FVector Origin, double Volume, Earthwork::Material Type,
         FVector Direction = FVector::ZeroVector, double FloorZ = -BIG_NUMBER, double ThrowScale = 1.0);
     void UpdateSpills(double Dt);
@@ -121,7 +123,9 @@ public:
 
 private:
     friend class AMudWorldValidation;
-    static constexpr int32 TileSize = 64;
+    // Keep quarter-metre detail, but bound each local mesh/collision upload to
+    // 32 m instead of rebuilding attributes for an entire 64 m square.
+    static constexpr int32 TileSize = 32;
     static constexpr int32 CrownTiers = 3;
     static constexpr int32 RubbleRadius = 36;
     static constexpr double CreekMargin = 5.0;

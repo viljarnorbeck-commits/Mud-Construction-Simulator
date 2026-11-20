@@ -14,6 +14,7 @@ static Point Frame(double Lift,Point P)
 static Point InBlade(Point P,double Lift,double Yaw,double Tilt)
 {
     const auto O=Origin(Lift,Yaw,Tilt);P={P.X-O.X,P.Y-O.Y,P.Z-O.Z};
+    P=Pitch(P,-FrameAngle(Lift));
     const double A=Yaw*Pi/180,B=Tilt*Pi/180;
     const double X=P.X*std::cos(A)+P.Y*std::sin(A),Y=-P.X*std::sin(A)+P.Y*std::cos(A);
     return {X,Y*std::cos(B)-P.Z*std::sin(B),Y*std::sin(B)+P.Z*std::cos(B)};
@@ -29,7 +30,7 @@ int main()
     int Poses=0;
     for(double Lift=MinLift;Lift<=MaxLift+.001;Lift+=.133)for(double Yaw=-25;Yaw<=25;Yaw+=5)for(double Tilt=-8;Tilt<=8;Tilt+=2)
     {
-        const auto O=Origin(Lift,Yaw,Tilt),R=Rotate(Pin,Yaw,Tilt);
+        const auto O=Origin(Lift,Yaw,Tilt),R=BladeRotate(Pin,Lift,Yaw,Tilt);
         assert(Distance({O.X+R.X,O.Y+R.Y,O.Z+R.Z},Frame(Lift,{PushLength,0,0}))<1e-8);
         // C-frame beam corners remain behind the moldboard, even at full yaw/tilt.
         for(double X:{0.,PushLength-100,PushLength-72})for(double Y:{-166.5,166.5})for(double Z:{-17.,20.})
@@ -40,7 +41,7 @@ int main()
         for(double Side:{-1.,1.})
         {
             const Point Base=Frame(Lift,{PushLength-90,Side*PushHalfWidth,20});
-            const auto Q=Rotate({-50,Side*85,38},Yaw,Tilt);const Point End{O.X+Q.X,O.Y+Q.Y,O.Z+Q.Z};
+            const auto Q=BladeRotate({-50,Side*85,38},Lift,Yaw,Tilt);const Point End{O.X+Q.X,O.Y+Q.Y,O.Z+Q.Z};
             assert(Distance(Base,End)>86);assert(Distance(Base,End)<85*2.05);
             // Sample the cylinder axis with its barrel radius against the real curved panel.
             for(int I=0;I<=30;++I) {
@@ -48,7 +49,7 @@ int main()
                 if(P.Z>-26.5&&P.Z<94&&std::abs(P.Y)<172)assert(P.X+7<PanelBack(P.Z,P.Y));
             }
         }
-        const auto N=Neutral(Lift),BaseOffset=Rotate({-50,-55,-10},Yaw,0),EndOffset=Rotate({-55,-60,76},Yaw,Tilt);
+        const auto N=Neutral(Lift),BaseOffset=BladeRotate({-50,-55,-10},Lift,Yaw,0),EndOffset=BladeRotate({-55,-60,76},Lift,Yaw,Tilt);
         const Point TiltBase{N.X+Pin.X+BaseOffset.X,N.Y+Pin.Y+BaseOffset.Y,N.Z+Pin.Z+BaseOffset.Z};
         const Point TiltEnd{O.X+EndOffset.X,O.Y+EndOffset.Y,O.Z+EndOffset.Z};
         assert(Distance(TiltBase,TiltEnd)>41&&Distance(TiltBase,TiltEnd)<40*2.05);

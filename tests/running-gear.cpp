@@ -11,6 +11,9 @@ static void Near(double Actual, double Expected, double Tolerance = 1e-9)
 
 int main()
 {
+    SoilDrivetrain LowReverse;double Speed=0,Travel=0;
+    for(int I=0;I<600;++I){Speed=LowReverse.Advance(Speed,-.7,2.35,.8,0,.5,1,-.18,true,false,1./60);Travel+=Speed/60;}
+    assert(Travel<-3); // Reverse uphill with the same engine/traction caps, in low range.
     constexpr double Radius = 0.65;
     Near(RollDegrees(2 * Pi * Radius, Radius), -360);
     Near(RollDegrees(-2 * Pi * Radius, Radius), 360);

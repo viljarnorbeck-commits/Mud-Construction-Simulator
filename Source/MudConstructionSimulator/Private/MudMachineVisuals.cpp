@@ -707,7 +707,8 @@ void AMudMachine::BuildDozerBody(const TCHAR* Paint)
 
 void AMudMachine::BuildBlade(const TCHAR* Paint)
 {
-    const FVector2D Curve[] = {{12, -26.5}, {0, -11}, {-9, 8}, {-16, 30}, {-15, 52}, {-6, 74}, {13, 94}};
+    FVector2D Curve[DozerRig::Profile.size()];
+    for(size_t I=0;I<DozerRig::Profile.size();++I)Curve[I]={DozerRig::Profile[I].X,DozerRig::Profile[I].Z};
     const double Stations[] = {-172, -147, -117, 117, 147, 172};
     const auto Point = [](FVector2D Profile, double Y, double Thickness = 0)
     {

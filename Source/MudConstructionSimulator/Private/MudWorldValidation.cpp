@@ -115,7 +115,7 @@ bool AMudWorldValidation::TestDozerMechanics()
         Pins&=FVector::Distance(A,D->DozerYawCarrier->GetComponentLocation())<.001;
         for(double Side:{-172.,0.,172.})
         {
-            const auto Edge=DozerRig::Edge(Side),O=DozerRig::Origin(Lift,Yaw,Tilt),R=DozerRig::Rotate(Edge,Yaw,Tilt);
+            const auto Edge=DozerRig::Edge(Side),O=DozerRig::Origin(Lift,Yaw,Tilt),R=DozerRig::BladeRotate(Edge,Lift,Yaw,Tilt);
             const FVector Expected=D->GetActorTransform().TransformPosition({O.X+R.X,O.Y+R.Y,O.Z+R.Z});
             Edges&=FVector::Distance(Expected,D->Tool->GetComponentTransform().TransformPosition({Edge.X,Edge.Y,Edge.Z}))<.001;
         }
@@ -145,6 +145,43 @@ bool AMudWorldValidation::TestDozerMechanics()
     {D->Drive(1./60,1,0,false,*Terrain,Fleet);D->Work(1./60,0,0,*Terrain,Fleet);}
     const double Mounds=D->Position.X-Origin.X;const bool Upright=D->RolledSide==0;
     const bool MoundMassKept=FMath::Abs(Mass()-MoundMass)<.00001;
+    // A narrow crest between the tracks is not supported by the belts. Loose
+    // material must yield under the belly; the same intact rock must still block.
+    const auto BellyCrest=[&](bool Fixed)
+    {
+        if(!Prepare())return -1.;
+        const FVector2D Peak=Origin+FVector2D(8,0);
+        Earthwork::Load Crest;Crest.Add(Fixed?Earthwork::Material::Rock:Earthwork::Material::Soil,.75);
+        Terrain->Deposit(Peak,.49,Crest);
+        if(Fixed){const int Cell=Terrain->Index(FMath::RoundToInt(Peak.X),FMath::RoundToInt(Peak.Y));
+            Terrain->Edit(Cell).Layers.back().Loose=false;}
+        D->Blade=DozerRig::MaxLift-D->BladeLift;D->UpdatePose(*Terrain);
+        const double InitialMass=Mass();
+        for(int I=0;I<900&&D->Position.X<Origin.X+17;++I)
+        {D->Drive(1./60,1,0,false,*Terrain,Fleet);D->Work(1./60,0,0,*Terrain,Fleet);}
+        if(FMath::Abs(Mass()-InitialMass)>.00001)return -1.;
+        return D->Position.X-Origin.X;
+    };
+    const double LooseCrest=BellyCrest(false),RockCrest=BellyCrest(true);
+    UE_LOG(LogTemp,Display,TEXT("Dozer belly crest: loose %.3f m, intact rock %.3f m"),LooseCrest,RockCrest);
+    const auto TiltCut=[&](double Tilt)
+    {
+        if(!Prepare())return 0.;D->Blade=-.65;D->BucketTilt=Tilt;D->UpdatePose(*Terrain);
+        D->Work(1./60,0,0,*Terrain,Fleet);const double InitialMass=Mass();
+        for(int I=0;I<600;++I){D->Drive(1./60,.6,0,false,*Terrain,Fleet);D->Work(1./60,0,0,*Terrain,Fleet);}
+        const FVector2D Cross=Origin+FVector2D(4.5,0);
+        const double Difference=Terrain->Height(Cross-FVector2D(0,1))-Terrain->Height(Cross+FVector2D(0,1));
+        for(int I=0;I<180;++I)D->Work(1./60,1,0,*Terrain,Fleet);
+        const double End=D->Position.X;
+        UE_LOG(LogTemp,Display,TEXT("Dozer reverse start: rolled %d, speed %.3f, belt %.3f, grip %.3f, water %.3f, cargo %.3f, rear obstacle %d"),
+            D->RolledSide,D->Speed,D->Drivetrain.WheelSpeed,D->Grip,D->Water,D->Cargo.Volume(),Terrain->HitsTree(D->Position-FVector2D(1.5,0),D->OffRoadRadius(),false));
+        for(int I=0;I<600&&D->Position.X>Origin.X-4;++I){D->Drive(1./60,-.7,0,false,*Terrain,Fleet);D->Work(1./60,0,0,*Terrain,Fleet);}
+        const double Backed=End-D->Position.X;
+        UE_LOG(LogTemp,Display,TEXT("Dozer reverse finish: rolled %d, speed %.3f, belt %.3f, grip %.3f, water %.3f"),D->RolledSide,D->Speed,D->Drivetrain.WheelSpeed,D->Grip,D->Water);
+        UE_LOG(LogTemp,Display,TEXT("Dozer tilted cut %.0f: crossfall delta %.4f m, forward %.3f m, reversed %.3f m, mass error %.9f t"),Tilt,Difference,End-Origin.X,Backed,Mass()-InitialMass);
+        return Backed>2&&FMath::Abs(Mass()-InitialMass)<.00001?Difference:0.;
+    };
+    const double TiltLeft=TiltCut(-8),TiltRight=TiltCut(8);
     if(!Prepare())return false;
     Earthwork::Load Heap;Heap.Add(Earthwork::Material::Soil,3);Terrain->Deposit(Origin+FVector2D(10,0),2.3,Heap);
     const double PileBefore=Terrain->Height(Origin+FVector2D(10,0));
@@ -186,8 +223,20 @@ bool AMudWorldValidation::TestDozerMechanics()
     for(int I=0;I<1200&&D->Position.X<Origin.X+18;++I)
     {D->Drive(1./60,.7,0,false,*Terrain,Fleet);D->Work(1./60,0,0,*Terrain,Fleet);}
     const double HeldDepth=Z-Terrain->Height(Origin+FVector2D(8,0));
-    const bool GradeHold=D->Position.X>Origin.X+8&&HeldDepth>.10&&HeldDepth<.45;
-    UE_LOG(LogTemp,Display,TEXT("Dozer grade hold: travel %.2f m, centre cut %.3f m, stable %d"),D->Position.X-Origin.X,HeldDepth,GradeHold);
+    const double HeldTravel=D->Position.X-Origin.X,HeldCargo=D->Cargo.Volume(),HeldDraft=D->DraftForceKN;
+    bool Relief=false;
+    if(HeldTravel<=8&&HeldCargo>.2)
+    {
+        // A deep continuous cut can exhaust drive force before the volume limit.
+        // Prove that raising/releasing the blade restores travel, rather than
+        // demanding unlimited pushing force from the reference-height regression.
+        for(int I=0;I<180;++I)D->Work(1./60,1,0,*Terrain,Fleet);
+        const double StartX=D->Position.X;
+        for(int I=0;I<360;++I){D->Drive(1./60,.7,0,false,*Terrain,Fleet);D->Work(1./60,0,0,*Terrain,Fleet);}
+        Relief=D->Cargo.Volume()<.001&&D->Position.X-StartX>2;
+    }
+    const bool GradeHold=HeldTravel>6&&HeldDepth>.10&&HeldDepth<.45&&(HeldTravel>8||Relief);
+    UE_LOG(LogTemp,Display,TEXT("Dozer grade hold: travel %.2f m, centre cut %.3f m, cargo %.2f m3, draft %.1f kN, relief %d, stable %d"),HeldTravel,HeldDepth,HeldCargo,HeldDraft,Relief,GradeHold);
     // Existing native surface validation compares updated triangles/normals and also
     // performs a fractional-cell deformation/restore; verify actual Chaos height too.
     Terrain->UpdateTiles(Origin);for(int I=0;I<12;++I)Terrain->UpdateTiles(Origin);
@@ -198,14 +247,15 @@ bool AMudWorldValidation::TestDozerMechanics()
     Terrain->Pits=Pits;const bool Restored=Terrain->RestoreTerrain(Saved);
     UE_LOG(LogTemp,Display,TEXT("Dozer A-H: geometry %d (cylinder %.1f..%.1f cm), mounds %.2f m upright %d, push %.2f m moved %.2f m3 draft %.1f kN mass %.9f t, overload %.2f m slip %.2f m/s, side %.2f/%.2f m, collision %d restore %d"),
         Geometry,MinLink,MaxLink,Mounds,Upright,Push,Moved,PeakDraft,PushError,Heavy,Spin,Left,Right,Collision,Restored);
-    return Geometry&&Mounds>26&&Upright&&MoundMassKept&&Push>6&&Moved>.3&&PileCut&&FMath::Abs(PushError)<.00001&&Heavy<1&&
+    return Geometry&&Mounds>26&&Upright&&MoundMassKept&&LooseCrest>15&&RockCrest>0&&RockCrest<8&&TiltLeft<-.06&&TiltRight>.06&&Push>6&&Moved>.3&&PileCut&&FMath::Abs(PushError)<.00001&&Heavy<1&&
         (Spin>1||FMath::Abs(HeavySpeed)<.05)&&
         Left<-.2&&Right>.2&&GradeHold&&Collision&&Restored;
 }
 
 bool AMudWorldValidation::TestGeneratedEarthwork()
 {
-    if(!Terrain->GetWorldId().StartsWith(TEXT("earthworks-v3-")))return true;
+    const bool Natural=Terrain->GetWorldId().StartsWith(TEXT("earthworks-v4-"));
+    if(!Natural&&!Terrain->GetWorldId().StartsWith(TEXT("earthworks-v3-")))return true;
     const auto Saved=Terrain->SaveTerrain();
     const FVector2D Bank(239,1640),Ravine(337,1640);
     const double BankBefore=Terrain->Height(Bank),RavineBefore=Terrain->Height(Ravine);
@@ -224,7 +274,7 @@ bool AMudWorldValidation::TestGeneratedEarthwork()
         FMath::Abs(Terrain->Height(Ravine)-RavineBefore)<.001;
     UE_LOG(LogTemp,Display,TEXT("Earthworks generated bank: slope %.2f, excavated %.3f m3, soft %d, cut/fill %d, mass error %.9f t, restore %d"),
         Wall,Soil.Volume(),SoftFace,Changed,Error,Restored);
-    return Wall>3&&SoftFace&&Changed&&FMath::Abs(Error)<.00001&&Restored;
+    return Wall>(Natural?.35:3)&&(!Natural||Wall<1)&&SoftFace&&Changed&&FMath::Abs(Error)<.00001&&Restored;
 }
 
 bool AMudWorldValidation::TestMobility()

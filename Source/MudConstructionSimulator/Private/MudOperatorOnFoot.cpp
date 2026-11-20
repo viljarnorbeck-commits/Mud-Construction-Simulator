@@ -1,6 +1,7 @@
 #include "MudGameMode.h"
 
 #include "Camera/CameraComponent.h"
+#include "Components/PoseableMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/SkeletalMesh.h"
 #include "MudAudio.h"
@@ -36,7 +37,83 @@ void AMudOperator::InitializeFootAvatar()
     FootAvatar->SetSkeletalMesh(Mesh);
     FootAvatar->SetWorldScale3D(FVector(Scale));
     FootAvatar->SetAnimInstanceClass(UMudWorkerAnimation::StaticClass());
+    DriverAvatar->SetSkinnedAssetAndUpdate(Mesh);
     FootAvatarGroundOffset = (Bounds.BoxExtent.Z - Bounds.Origin.Z) * Scale;
+}
+
+void AMudOperator::UpdateDriverAvatar(const AMudMachine* Machine)
+{
+    const auto* Mesh = Cast<USkeletalMesh>(DriverAvatar->GetSkinnedAsset());
+    auto* Seat = Machine ? Machine->GetDriverSeat() : nullptr;
+    if (!Mesh || !Seat || bCab)
+    {
+        DriverAvatar->SetVisibility(false);
+        return;
+    }
+    if (DriverAvatar->GetAttachParent() == Seat)
+    {
+        DriverAvatar->SetVisibility(true);
+        return;
+    }
+
+    const FReferenceSkeleton& Skeleton = Mesh->GetRefSkeleton();
+    const int32 Pelvis = Skeleton.FindBoneIndex(TEXT("Body"));
+    if (Pelvis == INDEX_NONE)
+        return;
+    auto& Local = DriverAvatar->BoneSpaceTransforms;
+    Local = Skeleton.GetRefBonePose();
+    TArray<FTransform> RefPose;
+    RefPose.SetNumUninitialized(Local.Num());
+    for (int32 Index = 0; Index < Local.Num(); ++Index)
+    {
+        const int32 Parent = Skeleton.GetParentIndex(Index);
+        RefPose[Index] = Parent == INDEX_NONE ? Local[Index] : Local[Index] * RefPose[Parent];
+    }
+
+    const FVector Hip = RefPose[Pelvis].GetLocation();
+    const double PersonScale = FootAvatar->GetComponentScale().X;
+    const double SeatScale = Seat->GetComponentScale().X;
+    const auto Reach = [&](FName UpperName, FName LowerName, FName EndName,
+        FVector FromSeatCm, FVector BendDirection, bool bFoot)
+    {
+        const int32 Upper = Skeleton.FindBoneIndex(UpperName);
+        const int32 Lower = Skeleton.FindBoneIndex(LowerName);
+        const int32 End = Skeleton.FindBoneIndex(EndName);
+        if (Upper == INDEX_NONE || Lower == INDEX_NONE || End == INDEX_NONE ||
+            Skeleton.GetParentIndex(Lower) != Upper)
+            return;
+        const FVector Start = RefPose[Upper].GetLocation();
+        const FVector First = RefPose[Lower].GetLocation() - Start;
+        const FVector Second = RefPose[End].GetLocation() - RefPose[Lower].GetLocation();
+        const double A = First.Size(), B = Second.Size();
+        const FVector Span = Hip + FromSeatCm / (PersonScale * SeatScale) - Start;
+        const FVector Direction = Span.GetSafeNormal();
+        const double Distance = FMath::Clamp(Span.Size(), FMath::Abs(A - B) + 0.01, A + B - 0.01);
+        const FVector Bend = FVector::VectorPlaneProject(BendDirection, Direction).GetSafeNormal();
+        const double Along = (A * A - B * B + Distance * Distance) / (2.0 * Distance);
+        const FVector Joint = Direction * Along + Bend * FMath::Sqrt(FMath::Max(0.0, A * A - Along * Along));
+        const FQuat UpperRotation = FQuat::FindBetweenVectors(First, Joint) * RefPose[Upper].GetRotation();
+        const FQuat LowerRotation = FQuat::FindBetweenVectors(Second, Direction * Distance - Joint) * RefPose[Lower].GetRotation();
+        Local[Upper].SetRotation(RefPose[Skeleton.GetParentIndex(Upper)].InverseTransformRotation(UpperRotation));
+        Local[Lower].SetRotation(UpperRotation.Inverse() * LowerRotation);
+        // The Worker's foot controls are parented to the rig root independently of the shin.
+        if (bFoot)
+            Local[End].SetTranslation(RefPose[Skeleton.GetParentIndex(End)].InverseTransformPosition(Start + Direction * Distance));
+    };
+    const double AnkleHeight = 10.0 - Seat->GetRelativeLocation().Z;
+    Reach(TEXT("UpperLeg_L"), TEXT("LowerLeg_L"), TEXT("Foot_L"), {48, -12, AnkleHeight}, FVector::ForwardVector, true);
+    Reach(TEXT("UpperLeg_R"), TEXT("LowerLeg_R"), TEXT("Foot_R"), {50, 12, AnkleHeight}, FVector::ForwardVector, true);
+    const bool bSteeringWheel = Machine->Kind != EMudMachine::Excavator && Machine->Kind != EMudMachine::Dozer;
+    const double HandX = bSteeringWheel ? 49 : 27;
+    const double HandY = bSteeringWheel ? 17 : 30;
+    const double HandZ = bSteeringWheel ? 37 : 15;
+    Reach(TEXT("UpperArm_L"), TEXT("LowerArm_L"), TEXT("Wrist_L"), {HandX, -HandY, HandZ}, FVector(0, -0.5, -1), false);
+    Reach(TEXT("UpperArm_R"), TEXT("LowerArm_R"), TEXT("Wrist_R"), {HandX, HandY, HandZ}, FVector(0, 0.5, -1), false);
+
+    DriverAvatar->AttachToComponent(Seat, FAttachmentTransformRules::KeepRelativeTransform);
+    DriverAvatar->SetRelativeTransform(FTransform(FQuat::Identity, -Hip * PersonScale, FVector(PersonScale)));
+    DriverAvatar->MarkRefreshTransformDirty();
+    DriverAvatar->SetVisibility(true);
 }
 
 bool AMudOperator::CanOccupyFoot(FVector2D Point, double Height, double Radius)
@@ -212,8 +289,8 @@ void AMudOperator::UpdateFootView(double Dt)
 
     FootCameraHeight = FMath::Lerp(FootCameraHeight, FootHeight, Dt > 0 ? 1.0 - FMath::Exp(-Dt * 10.0) : 1.0);
     const FRotator Rotation(LookPitch, LookYaw, 0);
-    const FVector Right = FRotator(0, LookYaw + 90, 0).Vector();
-    const FVector Focus = FVector(OnFoot.X, OnFoot.Y, FootCameraHeight + 1.12) * 100 + Right * 24;
+    const double BodyCenter = PersonHeight * 0.5 - BootSink;
+    const FVector Focus = FVector(OnFoot.X, OnFoot.Y, FootCameraHeight + BodyCenter) * 100;
     const FVector Back = -Rotation.Vector() * 100;
     double ClearLength = FootDistance;
     for (int32 I = 1; I <= 16; ++I)
@@ -231,5 +308,6 @@ void AMudOperator::UpdateFootView(double Dt)
         FMath::Lerp(FootCameraBoom, ClearLength, 1.0 - FMath::Exp(-Dt * 7.0));
     FVector View = Focus + Back * FootCameraBoom;
     View.Z = FMath::Max(View.Z, (Terrain->MeshHeight(XY(View) / 100.0) + 0.25) * 100);
-    Camera->SetWorldLocationAndRotation(View, Rotation);
+    const FVector Target = FVector(OnFoot.X, OnFoot.Y, FootHeight + BodyCenter) * 100;
+    Camera->SetWorldLocationAndRotation(View, (Target - View).Rotation());
 }

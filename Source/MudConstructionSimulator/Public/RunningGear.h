@@ -82,6 +82,10 @@ struct SoilContact
 struct SoilDrivetrain
 {
     double WheelSpeed = 0;
+    double EnginePull(double MassRatio,bool Tracked) const
+    {
+        return (Tracked?4.8:4.0)*MassRatio/(1.0+std::abs(WheelSpeed)/7.0);
+    }
 
     double Advance(double Speed, double Throttle, double SpeedLimit, double Grip, double Sink,
         double Radius, double MassRatio, double Grade, bool Tracked, bool Brake, double Dt, double DraftAcceleration = 0)
@@ -102,9 +106,14 @@ struct SoilDrivetrain
 
         constexpr double WheelInertia = 0.10;
         const double Target = Throttle * SpeedLimit * (Throttle < 0 ? 0.48 : 1.0);
-        const double Pull = (Tracked ? 4.8 : 4.0) * MassRatio / (1.0 + std::abs(WheelSpeed) / 7.0);
+        const double Pull = EnginePull(MassRatio,Tracked);
+        // Govern commanded travel speed in the selected range. A fixed gain
+        // accidentally derated drawbar force in low working/reverse ranges.
+        // Torque and soil traction retain exactly the same physical caps.
+        const double Range=SpeedLimit*(Throttle<0?.48:1.0);
+        const double Governor=std::max(2.5,Pull/std::max(.25,Range*.35));
         const double Motor = std::abs(Throttle) > 0.01 ?
-            std::clamp((Target - WheelSpeed) * 2.5, -Pull, Pull) : -WheelSpeed * 0.35;
+            std::clamp((Target - WheelSpeed) * Governor, -Pull, Pull) : -WheelSpeed * 0.35;
         double FreeWheel = WheelSpeed + Motor * Dt / WheelInertia;
         if (Brake)
             FreeWheel = 0;

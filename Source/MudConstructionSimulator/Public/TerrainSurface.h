@@ -4,6 +4,8 @@
 
 namespace TerrainSurface
 {
+inline constexpr int Refinement=4;
+inline constexpr double Spacing=1.0/Refinement;
 // Monotone cubic reconstruction: retains column heights and never invents extrema.
 inline double Tangent(double A, double B)
 {
@@ -24,7 +26,7 @@ template<class Read> double Reconstruct(double X, double Y, Read Height)
         Rows[R] = Curve(Height(I-1,J+R-1), Height(I,J+R-1), Height(I+1,J+R-1), Height(I+2,J+R-1), X-I);
     return Curve(Rows[0],Rows[1],Rows[2],Rows[3],Y-J);
 }
-// The renderer and contact queries use these same half-metre triangles.
+// The renderer and contact queries use these same quarter-metre triangles.
 inline double Triangle(double SW, double SE, double NW, double NE, double U, double V)
 {
     return U+V <= 1 ? SW+(SE-SW)*U+(NW-SW)*V : NE+(NW-NE)*(1-U)+(SE-NE)*(1-V);

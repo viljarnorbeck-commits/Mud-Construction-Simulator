@@ -594,7 +594,8 @@ void AMudMachine::Initialize(EMudMachine Type, FVector2D Location, AMudTerrain& 
     {
         Tool = Pivot(Root, BladeMount);
         DozerPushArms = Pivot(Root, DozerPushPivot);
-        DozerYawCarrier=Pivot(Root,BladeMount+DozerBladePin);
+        DozerYawCarrier=Pivot(DozerPushArms,{DozerPushLength,0,0});
+        Tool->AttachToComponent(DozerYawCarrier,FAttachmentTransformRules::KeepRelativeTransform);
         BuildDozerBody(Paint);
         for (const double Side : {-1.0, 1.0})
         {
@@ -821,7 +822,15 @@ void AMudMachine::Drive(double Dt, double Throttle, double Steering, bool bBrake
     SteeringCommand = MachineMotion::Approach(SteeringCommand, Steering, 5, Dt, 0.12);
     DriveCommand = MachineMotion::Approach(DriveCommand, bBrake ? 0 : Throttle, bBrake ? 12 : 6, Dt, 0.16);
     const FVector2D CurrentForward = Horizontal(FRotator(0, Heading, 0).Vector());
-    const double Grade = (Terrain.Height(Position + CurrentForward * 2) - Terrain.Height(Position - CurrentForward * 2)) * 0.25;
+    double Grade = (Terrain.Height(Position + CurrentForward * 2) - Terrain.Height(Position - CurrentForward * 2)) * 0.25;
+    if(bTracked)
+    {
+        const FVector2D R(-CurrentForward.Y,CurrentForward.X);
+        const double Half=Kind==EMudMachine::Dozer?DozerTrackHalfContact:BeltPath.HalfStraight;
+        const double TrackRadius=Kind==EMudMachine::Dozer?DozerTrackRadius:BeltPath.Radius;
+        Grade=TrackGround::Fit([&](double X,double Y){return Terrain.Height(Position+CurrentForward*X+R*Y);},
+            Half,TrackRadius,Tracks.IsEmpty()?1.1:FMath::Abs(Tracks[0].LateralM),.305).Pitch;
+    }
     const double WaterLimit = FordingLimit(Info.Clearance, LoadFraction);
     const double MaxSpeed = IsBladeWorking() ? 2.35 : Info.Speed;
     const double SpeedLimit = MaxSpeed * FMath::Sqrt(MassRatio);
@@ -905,6 +914,17 @@ void AMudMachine::Drive(double Dt, double Throttle, double Steering, bool bBrake
             DraftForceKN+=SoilDraft::DraftKN(Terrain.Surface(XY),Terrain.Wetness(XY),2.82/13,
                 FMath::Max(0.,Terrain.Height(XY)-P.Z),0,0);
         }
+    }
+    const double PullKN=FMath::Min(Drivetrain.EnginePull(MassRatio,bTracked),EffectiveGrip*9.81)*(Info.Mass+CarriedMass)*FMath::Abs(DriveCommand);
+    const double ClimbKN=(Info.Mass+CarriedMass)*9.81*FMath::Max(0.,Grade*FMath::Sign(DriveCommand))/FMath::Sqrt(1+Grade*Grade);
+    double HullWorkKJ=bTracked&&!bBrake?FMath::Max(0.,PullKN-DraftForceKN-ClimbKN)*.10*Dt:0;
+    if(BodyShare>.001&&HullWorkKJ>Epsilon)
+    {
+        // Existing belly contact must also yield at zero ground speed. Waiting
+        // for a predicted move leaves a compacted centre ridge locking reverse.
+        HullWorkKJ-=Terrain.YieldBody(Position,BodyAcross,BodyReach,
+            GetActorLocation().Z/100+BodyClearance/FMath::Max(.5,Up.Z),
+            {FVector2D::DotProduct(BodyGradient,BodyAcross),FVector2D::DotProduct(BodyGradient,BodyForward)},HullWorkKJ);
     }
     Speed = Drivetrain.Advance(Speed, DriveCommand, SpeedLimit, EffectiveGrip, Sink, Radius, MassRatio, Grade, bTracked, bBrake, Dt,
         DraftForceKN/(Info.Mass+CarriedMass)+BodyShare*9.81*Terrain.Grip(Position));
@@ -1002,8 +1022,19 @@ void AMudMachine::Drive(double Dt, double Throttle, double Steering, bool bBrake
                 return Terrain.Height(Center+Side*Y);
             },Rear,Front,Wheels.IsEmpty()?1.1:FMath::Abs(Wheels[0].LateralM),Clearance,.86);
         };
-        if(TerrainPassage::Grounds(Penetration(Position,Heading,Articulation),Penetration(Next,NextHeading,NextArticulation)))
-            return true;
+        double BeforeDepth=Penetration(Position,Heading,Articulation),AfterDepth=Penetration(Next,NextHeading,NextArticulation);
+        if(bTracked&&!bBrake&&FMath::Abs(DriveCommand)>.05&&TerrainPassage::Grounds(BeforeDepth,AfterDepth))
+        {
+            // A blunt hull can shear loose material, but only with the motor work
+            // left after blade draft. Never disable grounding or tunnel through rock.
+            const FVector2D F=Horizontal(FRotator(0,NextHeading,0).Vector()),R(-F.Y,F.X);
+            const auto Ground=[&](double X,double Y){return Terrain.Height(Next+F*X+R*Y);};
+            const double Half=Kind==EMudMachine::Dozer?DozerTrackHalfContact:BeltPath.HalfStraight;
+            const auto Support=TrackGround::Fit(Ground,Half,Radius,Tracks.IsEmpty()?1.1:FMath::Abs(Tracks[0].LateralM),.305);
+            HullWorkKJ-=Terrain.YieldBody(Next,R,{.72,Half},Support.Height+Clearance,{Support.Crossfall,Support.Pitch},HullWorkKJ);
+            BeforeDepth=Penetration(Position,Heading,Articulation);AfterDepth=Penetration(Next,NextHeading,NextArticulation);
+        }
+        if(TerrainPassage::Grounds(BeforeDepth,AfterDepth))return true;
         if (bArticulated || bTruck)
         {
             const auto HitsObstacle = [&](FVector2D Before, FVector2D After)
@@ -1264,13 +1295,13 @@ double AMudMachine::BladeWingOffset(double AcrossCm)
 double AMudMachine::BladeClearance(const AMudTerrain& Terrain, double Lift) const
 {
     const FTransform& Chassis = GetActorTransform();
-    const FRotator Rotation(0,BladeYaw,BucketTilt);
-    const FVector Mount = BladePosition(Lift)+DozerBladePin-Rotation.RotateVector(DozerBladePin);
+    const auto O=DozerRig::Origin(Lift,BladeYaw,BucketTilt);
     double Clearance = TNumericLimits<double>::Max();
     for (int I=0;I<=12;++I)
     {
         const auto P=DozerRig::Edge(FMath::Lerp(-DozerRig::HalfBlade,DozerRig::HalfBlade,I/12.));
-        const FVector Edge = Chassis.TransformPosition(Mount+Rotation.RotateVector({P.X,P.Y,P.Z})) / 100;
+        const auto R=DozerRig::BladeRotate(P,Lift,BladeYaw,BucketTilt);
+        const FVector Edge = Chassis.TransformPosition({O.X+R.X,O.Y+R.Y,O.Z+R.Z}) / 100;
         Clearance = FMath::Min(Clearance, Edge.Z - Terrain.Height(Horizontal(Edge)));
     }
     return Clearance;
@@ -1517,12 +1548,13 @@ void AMudMachine::Work(double Dt, double AxisA, double AxisB, AMudTerrain& Terra
                 BladeDatum = SampleBladeDatum(Terrain);
             // Hold the surveyed grade until the operator re-engages or takes manual
             // control. Following our own fresh cut creates a runaway deepening trench.
-            const FRotator Orientation(0,BladeYaw,BucketTilt);
-            const FVector LocalTip = BladePosition(0)+DozerBladePin+Orientation.RotateVector(BladeLip-DozerBladePin);
-            const double NeutralZ = GetActorTransform().TransformPosition(LocalTip).Z / 100.0;
-            const double VerticalTravel = FMath::Max(0.65, GetActorUpVector().Z);
             const double Depth = bUnload || bGrade ? 0.075 : 0.28;
-            Target = FMath::Clamp((BladeDatum.GetValue() - NeutralZ - Depth) / VerticalTravel, -0.38, 1.05);
+            double Lower=DozerRig::MinLift,Upper=DozerRig::MaxLift;
+            for(int I=0;I<16;++I){const double Lift=(Lower+Upper)*.5;
+                const auto O=DozerRig::Origin(Lift,BladeYaw,BucketTilt),R=DozerRig::BladeRotate({BladeLip.X,BladeLip.Y,BladeLip.Z},Lift,BladeYaw,BucketTilt);
+                const double Z=GetActorTransform().TransformPosition({O.X+R.X,O.Y+R.Y,O.Z+R.Z}).Z/100;
+                if(Z<BladeDatum.GetValue()-Depth)Lower=Lift;else Upper=Lift;}
+            Target=(Lower+Upper)*.5;
         }
         BladeLift = Move(BladeLift, Target, 1.85, 0.13);
         Blade=FMath::Clamp(BladeLift+Blade,DozerRig::MinLift,DozerRig::MaxLift)-BladeLift;
@@ -1894,6 +1926,18 @@ void AMudMachine::UpdateBladeHeap(const AMudTerrain& Terrain, double Fraction)
     Vertices.Reserve(Count);
     Normals.Reserve(Count);
     UV.Reserve(Count);
+    const auto OutsideBlade=[&](FVector Local)
+    {
+        FVector World=Payload->GetComponentTransform().TransformPosition(Local);
+        FVector BladeLocal=Tool->GetComponentTransform().InverseTransformPosition(World);
+        if(FMath::Abs(BladeLocal.Y)<DozerRig::HalfBlade&&BladeLocal.Z>=DozerRig::Profile.front().Z&&BladeLocal.Z<=DozerRig::Profile.back().Z)
+        {
+            BladeLocal.X=FMath::Max(BladeLocal.X,DozerRig::FaceX(BladeLocal.Z,BladeLocal.Y)+4.0);
+            World=Tool->GetComponentTransform().TransformPosition(BladeLocal);
+            World.Z=FMath::Max(World.Z,Terrain.Height({World.X/100,World.Y/100})*100-2);
+        }
+        return Payload->GetComponentTransform().InverseTransformPosition(World);
+    };
     for (int32 Row = 0; Row < BladeHeapRows; ++Row)
     {
         const double V = static_cast<double>(Row) / (BladeHeapRows - 1);
@@ -1911,7 +1955,7 @@ void AMudMachine::UpdateBladeHeap(const AMudTerrain& Terrain, double Fraction)
             const double Fold = FMath::PerlinNoise2D(FVector2D(MovingX * 1.8, Y * 1.6 + 1.2));
             const double Ripples = FMath::PerlinNoise2D(FVector2D(MovingX * 3.6, Y * 3.1 - 4.1));
             const double Height = Relief * Shoulder * Crest * (0.94 + Fold * 0.15 + Ripples * 0.045);
-            Vertices.Emplace(X * 100.0, Y * 100.0, (Ground - Anchor.Z + Height) * 100.0 - 2.0);
+            Vertices.Add(OutsideBlade({X*100,Y*100,(Ground-Anchor.Z+Height)*100-2}));
             UV.Emplace(MovingX * 0.65, Y * 0.65);
         }
     }
@@ -2057,11 +2101,11 @@ void AMudMachine::UpdatePose(const AMudTerrain& Terrain)
         const FVector BladeLocation = BladePosition(BladeLift + Blade);
         BladeYaw=FMath::Clamp(BladeYaw,-DozerRig::MaxYaw,DozerRig::MaxYaw);
         BucketTilt=FMath::Clamp(BucketTilt,-DozerRig::MaxTilt,DozerRig::MaxTilt);
-        const FRotator Orientation(0,BladeYaw,BucketTilt);
-        Tool->SetRelativeLocationAndRotation(BladeLocation+DozerBladePin-Orientation.RotateVector(DozerBladePin),Orientation);
+        const FRotator Orientation(0,0,BucketTilt);
+        Tool->SetRelativeLocationAndRotation(-Orientation.RotateVector(DozerBladePin),Orientation);
         const FVector Along = BladeLocation + DozerBladePin - DozerPushPivot;
         DozerPushArms->SetRelativeRotation(FRotator(FMath::RadiansToDegrees(FMath::Atan2(Along.Z, Along.X)), 0, 0));
-        DozerYawCarrier->SetRelativeLocationAndRotation(BladeLocation+DozerBladePin,FRotator(0,BladeYaw,0));
+        DozerYawCarrier->SetRelativeLocationAndRotation({DozerPushLength,0,0},FRotator(0,BladeYaw,0));
     }
     if (Kind == EMudMachine::Loader)
     {
