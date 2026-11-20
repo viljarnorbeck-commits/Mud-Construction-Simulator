@@ -271,6 +271,10 @@ void AMudMachine::BuildCabControls(USceneComponent* Cab, FVector Size)
     const double SeatHeight = Size.Z * 0.26;
     const FVector Eye(-Size.X * 0.19, DriverY, Size.Z * 0.79);
     CabEye = Pivot(Cab, Eye);
+    const double HipHeight = SeatHeight + 15.0;
+    DriverSeat = Pivot(Cab, {SeatX - 4.0, DriverY, HipHeight});
+    // The excavator has less headroom than the large transport cabs.
+    DriverSeat->SetRelativeScale3D(FVector(FMath::Clamp((Size.Z - HipHeight - 5.0) / 96.0, 0.84, 1.0)));
 
     // Trim goes inside the glass and below the original window opening.
     Part(TEXT("Cube"), TEXT("CabFloor"), Cab, {0, 0, 3}, {Size.X * 0.0096, Size.Y * 0.0094, 0.061});
@@ -959,11 +963,13 @@ void AMudMachine::BuildLoaderBody(const TCHAR* Paint)
     Part(TEXT("Cylinder"), TEXT("Steel"), Front, {0, 0, 103}, {0.33, 0.33, 0.56});
     Part(TEXT("Cube"), TEXT("Chassis"), Front, {25, 0, 101}, {0.53, 0.60, 0.35});
     Part(TEXT("Cube"), TEXT("Chassis"), RearFrame, {-28, 0, 101}, {0.55, 0.60, 0.40});
-    const FVector2D TiltSupport[] = {{61, 102}, {103, 102}, {105, 141}, {97, 158}, {76, 164}, {61, 151}};
-    BevelBody(Front, TEXT("Chassis"), TiltSupport, 0, 14, 5);
+    const FVector2D TiltSupport[] = {{8, 24}, {42, 24}, {43, 59}, {35, 72}, {17, 72}, {8, 59}};
+    BevelBody(BoomPivot, Paint, TiltSupport, 0, 14, 4);
+    Part(TEXT("Cylinder"), TEXT("Steel"), BoomPivot, {LoaderRig::TiltBase.X, 0, LoaderRig::TiltBase.Z},
+        {0.22, 0.22, 0.36}, FRotator(0, 0, 90));
 
     const auto LiftArm = LoaderProfile(LoaderRig::ArmProfile);
-    const FVector2D Tower[] = {{38, 73}, {114, 73}, {121, 111}, {96, 151}, {67, 159}, {39, 145}, {34, 107}};
+    const FVector2D Tower[] = {{35, 73}, {120, 73}, {122, 126}, {96, 192}, {69, 213}, {42, 205}, {31, 130}};
     const FVector2D Vent[] = {{-310, 144}, {-188, 144}, {-169, 177}, {-283, 178}, {-306, 168}};
     const auto Rocker = LoaderProfile(LoaderRig::RockerProfile);
     LoaderRocker = Pivot(BoomPivot, {LoaderRig::RockerPin.X, 0, LoaderRig::RockerPin.Z});
@@ -999,8 +1005,8 @@ void AMudMachine::BuildLoaderBody(const TCHAR* Paint)
         Part(TEXT("Cube"), TEXT("Steel"), RearFrame, {-35, Side * 100, 99}, {0.39, 0.23, 0.055});
         Part(TEXT("Cube"), TEXT("Steel"), RearFrame, {-35, Side * 105, 73}, {0.38, 0.21, 0.052});
         const double Y = Side * 39;
-        const FVector LiftLine[] = {{9, Y, 19}, {30, Y, 22}, {68, Y, 30}, {108, Y, 33}, {140, Y, 29},
-            {183, Y, 27}, {216, Y, 20}, {234, Y, 17}};
+        const FVector LiftLine[] = {{9, Y, 19}, {30, Y, 22}, {68, Y, 30}, {108, Y, 33}, {166, Y, 29},
+            {218, Y, 27}, {253, Y, 20}, {275, Y, 17}};
         LiftPipes.Tube(LiftLine, 1.6);
         const FVector Handrail[] = {{-57, Side * 90, 120}, {-61, Side * 94, 146}, {-58, Side * 93, 176},
             {-51, Side * 87, 191}, {-48, Side * 79, 193}};

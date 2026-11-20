@@ -22,10 +22,12 @@ struct FSpec
     double Capacity, Speed, Mass, Turn, Clearance, Footprint;
 };
 
+constexpr double DumperSteeringDegrees = 24.0;
+
 constexpr FSpec Specs[] = {
     { TEXT("Cat D6"), TEXT("Amber"), 6, 4.2, 19, 68, 1.30, 1.45 },
     { TEXT("Volvo EC300E"), TEXT("Amber"), 3.2, 3.6, 24, 48, 1.30, 1.45 },
-    { TEXT("Volvo A30G"), TEXT("Amber"), 16, 10.5, 17, 32, 1.06, 1.48 },
+    { TEXT("Volvo A30G"), TEXT("Amber"), 16, 10.5, 17, DumperSteeringDegrees, 1.06, 1.48 },
     { TEXT("Volvo FMX 6x6"), TEXT("Teal"), 24, 13.5, 15, 29, 1.05, 1.46 },
     { TEXT("Volvo L120H"), TEXT("Amber"), 3.4, 8.0, 20, 36, 0.80, 1.48 }
 };
@@ -610,13 +612,14 @@ void AMudMachine::Initialize(EMudMachine Type, FVector2D Location, AMudTerrain& 
         for (const double Side : {-1.0, 1.0})
         {
             const double Y = Side * LoaderRig::LiftArmAcross;
-            AddHydraulic(Root, {68, Y, 72}, BoomPivot, {155, Y, -2}, 104, 0.20);
+            AddHydraulic(Root, {LoaderRig::LiftBase.X, Y, LoaderRig::LiftBase.Z}, BoomPivot,
+                {LoaderRig::LiftRod.X, Y, LoaderRig::LiftRod.Z}, 170, 0.20);
             AddHydraulic(Root, {35, Side * 47, 89}, RearFrame, {-57, Side * 66, 89}, 63, 0.11);
         }
         BucketLink = Part(TEXT("Cube"), TEXT("Chassis"), BoomPivot, {}, {LoaderRig::LinkLength / 100, 0.14, 0.12});
-        AddHydraulic(Root, LoaderPin(LoaderRig::TiltBase), LoaderRocker, LoaderPin(LoaderRig::TiltRod), 96, 0.19);
+        AddHydraulic(BoomPivot, LoaderPin(LoaderRig::TiltBase), LoaderRocker, LoaderPin(LoaderRig::TiltRod), 148, 0.21);
         BuildLoaderBucket(145);
-        BuildCargoSurface(Tool, {LoaderRig::Lip.X - 66, 0, -43}, {0.85, 2.15, 0.72});
+        BuildCargoSurface(Tool, {100, 0, -35}, {1.00, 2.65, 0.92});
     }
     else if (Kind == EMudMachine::Truck)
     {
@@ -641,6 +644,7 @@ void AMudMachine::Initialize(EMudMachine Type, FVector2D Location, AMudTerrain& 
         BuildCargoSurface(TipBed, {185, 0, 12}, {3.6, 2.14, 0.8});
     }
     UpdatePose(Terrain);
+    if (TipBed) Terrain.RegisterMaterialReceiver(*this);
 }
 
 const TCHAR* AMudMachine::Name() const { return Spec(Kind).Name; }
@@ -867,7 +871,7 @@ void AMudMachine::Drive(double Dt, double Throttle, double Steering, bool bBrake
     if (bArticulated)
     {
         if (FMath::Abs(Steering) > 0.01 || FMath::Abs(Speed) > 0.08)
-            NextArticulation = MachineMotion::Approach(Articulation, -SteeringAtSpeed * (bDumper ? 32.0 : ArticulationLimit()),
+            NextArticulation = MachineMotion::Approach(Articulation, -SteeringAtSpeed * (bDumper ? DumperSteeringDegrees : ArticulationLimit()),
                 bDumper ? 47 : 54, Dt, bDumper ? 0.16 : 0.13);
         PredictArticulated(DriveTravel);
     }
@@ -926,7 +930,9 @@ void AMudMachine::Drive(double Dt, double Throttle, double Steering, bool bBrake
                 return false;
             };
             const FVector2D NewFront = Horizontal(FRotator(0, NextHeading, 0).Vector());
-            const double FrontProbe = bTruck ? 3.12 : (bDumper ? 2.55 : 1.65);
+            // Loader tyres end 2.43 m ahead of the articulation. The old 1.65 + 1.26 m
+            // capsule left a phantom half metre between the tyres and a receiving bed.
+            const double FrontProbe = bTruck ? 3.12 : (bDumper ? 2.55 : 1.18);
             if (HitsObstacle(Position + CurrentForward * FrontProbe, Next + NewFront * FrontProbe))
                 return true;
             const double RearProbe = Kind == EMudMachine::Loader ? -2.68 : -3.33;
@@ -1186,38 +1192,78 @@ double AMudMachine::SampleBladeDatum(const AMudTerrain& Terrain) const
     return Near - FMath::Clamp(Rise, -0.22, 0.22);
 }
 
+FVector AMudMachine::BedLoadPoint() const
+{
+    return TipBed ? TipBed->GetComponentTransform().TransformPosition(
+        FVector(Kind == EMudMachine::Truck ? 246 : 185, 0, 8)) / 100 : FVector::ZeroVector;
+}
+
+bool AMudMachine::InterceptMaterial(FVector From, FVector& To, FVector& Velocity, Load& Material, bool bReceive)
+{
+    if (!TipBed || RolledSide != 0 || (bReceive && Material.Volume() <= Epsilon)) return false;
+    const FTransform Pose = TipBed->GetComponentTransform();
+    const FVector A = Pose.InverseTransformPosition(From * 100);
+    const FVector B = Pose.InverseTransformPosition(To * 100);
+    const FVector Delta = B - A;
+    const bool bTruck = Kind == EMudMachine::Truck;
+    const double Front = bTruck ? TruckBedFrontCm - 8 : 365;
+    const double HalfWidth = bTruck ? 119 : 113;
+    const auto Rim = [bTruck](double X)
+    {
+        return bTruck ? 119.0 : FMath::Lerp(62.0, 103.0, FMath::Clamp(X / 365.0, 0.0, 1.0));
+    };
+    const double Floor = 8 + (bTruck ? 120 : 100) * FMath::Clamp(Cargo.Volume() / Capacity(), 0.0, 1.0);
+    double HitTime = 2;
+    FVector Normal = FVector::ZeroVector;
+    bool bFloor = false;
+    const auto Contact = [&](double T, FVector N, bool IsFloor)
+    {
+        if (T < 0 || T > 1 || T >= HitTime) return;
+        const FVector P = A + Delta * T;
+        if (P.X < 0 || P.X > Front || FMath::Abs(P.Y) > HalfWidth + 0.01 ||
+            P.Z < 0 || (!IsFloor && P.Z > (FMath::Abs(N.X) > 0 ? 119 : Rim(P.X)))) return;
+        HitTime = T; Normal = N; bFloor = IsFloor;
+    };
+    if (Delta.Z < -0.00001) Contact(A.Z <= Floor ? 0.0 : (Floor - A.Z) / Delta.Z, FVector::UpVector, true);
+    for (const double Side : {-1.0, 1.0})
+        if (FMath::Abs(Delta.Y) > 0.00001)
+            Contact((Side * HalfWidth - A.Y) / Delta.Y,
+                FVector(0, A.Y > HalfWidth ? 1 : (A.Y < -HalfWidth ? -1 : -Side), 0), false);
+    if (FMath::Abs(Delta.X) > 0.00001)
+    {
+        Contact((Front - A.X) / Delta.X, FVector(A.X > Front ? 1 : -1, 0, 0), false);
+        if (bTruck) Contact(-A.X / Delta.X, FVector(A.X < 0 ? -1 : 1, 0, 0), false);
+    }
+    if (HitTime > 1) return false;
+    FVector Hit = A + Delta * HitTime;
+    if (bReceive && bFloor && Bed.Angle < 8 && Cargo.Volume() < Capacity() - Epsilon)
+    {
+        const Load Received = Material.Take(FMath::Max(0.0, Capacity() - Cargo.Volume()));
+        Cargo.Receive(Received);
+        // The same cargo drives axle loads, rendering and save/load; no visual-only copies.
+    }
+    if (bFloor && Material.Volume() > Epsilon)
+    {
+        // Excess or a raised bed sheds over the nearest side, never disappears.
+        const double Side = Hit.Y >= 0 ? 1 : -1;
+        Hit = B;
+        Hit.Z = FMath::Max(Hit.Z, Floor + 0.1);
+        Velocity = Pose.TransformVectorNoScale(FVector(0, Side * 0.8, 0));
+    }
+    else
+    {
+        const FVector WorldNormal = Pose.TransformVectorNoScale(Normal).GetSafeNormal();
+        Velocity -= WorldNormal * FMath::Min(0.0, FVector::DotProduct(Velocity, WorldNormal)) * 1.15;
+        Hit += Normal * 0.5;
+    }
+    To = Pose.TransformPosition(Hit) / 100.0;
+    return true;
+}
+
 double AMudMachine::EmptyBucket(double Amount, AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
 {
     const FVector Point = ToolPoint();
     const FVector2D XY = Horizontal(Point);
-    if (Kind == EMudMachine::Excavator || Kind == EMudMachine::Loader)
-    {
-        for (auto* Other : Fleet)
-        {
-            if (!Other->TipBed || Other->IsTipping() || Other->RolledSide != 0)
-                continue;
-            const FVector Relative = Other->TipBed->GetComponentTransform().InverseTransformPosition(Point * 100);
-            const bool bTruck = Other->Kind == EMudMachine::Truck;
-            const double BedFront = bTruck ? TruckBedFrontCm - 5 : 377;
-            const double SideHeight = bTruck ? 119 : 95;
-            if (Relative.X < -12 || Relative.X > BedFront || FMath::Abs(Relative.Y) > 120)
-                continue;
-            const double Free = Other->Capacity() - Other->Cargo.Volume();
-            if (Relative.Z < SideHeight || Free <= Epsilon)
-            {
-                bBucketObstructed = true;
-                return 0;
-            }
-            const Load Released = Cargo.Take(FMath::Min(Amount, Free));
-            Other->Cargo.Receive(Released);
-            const double Fill = Other->Cargo.Volume() / Other->Capacity();
-            const double Floor = Other->TipBed->GetComponentTransform().TransformPosition(
-                FVector(Relative.X, Relative.Y, 12 + 45 * Fill)).Z / 100.0;
-            Terrain.ShowSpill(Point, Released.Volume(), Released.DominantMaterial(), FVector::ZeroVector, Floor);
-            Other->UpdatePose(Terrain);
-            return Released.Volume();
-        }
-    }
     if (XY.X > 1 && XY.Y > 1 && XY.X < Terrain.GetWorldSize() - 1 && XY.Y < Terrain.GetWorldSize() - 1)
     {
         const auto Released = Cargo.Take(Amount);
@@ -1248,6 +1294,7 @@ void AMudMachine::Work(double Dt, double AxisA, double AxisB, AMudTerrain& Terra
         return;
     bBucketObstructed = false;
     const FVector PreviousTip = ToolPoint();
+    const FTransform PreviousBucketPose = Tool->GetComponentTransform();
     const double PreviousAngles[] = {Boom, Stick, Curl, Swing, BucketTilt, Bed.Angle};
     const double PreviousBlade = BladeLift + Blade;
     const TOptional<FVector> PreviousBladeHeap = BladeHeapAnchor;
@@ -1337,14 +1384,15 @@ void AMudMachine::Work(double Dt, double AxisA, double AxisB, AMudTerrain& Terra
         const double CurlInput = FMath::Clamp(-AxisB + Direct.Curl, -1.0, 1.0);
         if (FMath::Abs(CurlInput) > 0.08)
             bUnload = false;
-        Boom = FMath::Clamp(Boom + Valve(ValveA, LiftInput * 33), LoaderRig::MinBoom, LoaderRig::MaxBoom);
+        const double PumpShare = 1.0 / FMath::Max(1.0, FMath::Abs(LiftInput) + FMath::Abs(CurlInput));
+        Boom = FMath::Clamp(Boom + Valve(ValveA, LiftInput * (LiftInput >= 0 ? 18.0 : 28.0) * PumpShare), LoaderRig::MinBoom, LoaderRig::MaxBoom);
         if (bUnload)
         {
-            ValveCurl = 0;
-            Curl = Move(Curl, LoaderRig::MinCurl, 60);
+            Curl = FMath::Max(LoaderRig::MinCurl, Curl + Valve(ValveCurl, -43 * PumpShare));
         }
         else
-            Curl = FMath::Clamp(Curl + Valve(ValveCurl, CurlInput * 48), LoaderRig::MinCurl, LoaderRig::MaxCurl);
+            Curl = FMath::Clamp(Curl + Valve(ValveCurl, CurlInput * 43 * PumpShare), LoaderRig::MinCurl, LoaderRig::MaxCurl);
+        Curl = Boom + LoaderRig::BucketPitch(Boom, Curl);
     }
     else if (Kind == EMudMachine::Dozer)
     {
@@ -1394,12 +1442,55 @@ void AMudMachine::Work(double Dt, double AxisA, double AxisB, AMudTerrain& Terra
             ValveA = 0;
         }
     }
+    if (Kind == EMudMachine::Loader && Boom < PreviousAngles[0])
+    {
+        const auto Penetration = [&](double Angle)
+        {
+            const FVector Edge = GetActorTransform().TransformPosition(LoaderPin(LoaderRig::CuttingEdge(Angle, Curl))) / 100;
+            return Terrain.Height(Horizontal(Edge)) - Edge.Z;
+        };
+        if (Penetration(Boom) > 0.12 && Penetration(PreviousAngles[0]) <= 0.12)
+        {
+            double Low = Boom, High = PreviousAngles[0];
+            for (int32 I = 0; I < 12; ++I)
+            {
+                const double Middle = (Low + High) * 0.5;
+                if (Penetration(Middle) > 0.12) Low = Middle; else High = Middle;
+            }
+            Boom = High; ValveA = 0;
+        }
+    }
     const double JointMotion = FMath::Abs(Boom - PreviousAngles[0]) + FMath::Abs(Stick - PreviousAngles[1]) +
         FMath::Abs(Curl - PreviousAngles[2]) + FMath::Abs(FMath::FindDeltaAngleDegrees(PreviousAngles[3], Swing)) +
         FMath::Abs(BucketTilt - PreviousAngles[4]) + FMath::Abs(Bed.Angle - PreviousAngles[5]);
     SoundHydraulic = FMath::Clamp((JointMotion / 52 + FMath::Abs(BladeLift + Blade - PreviousBlade) * 0.65) / Dt, 0.0, 1.0);
     UpdatePose(Terrain);
 
+    if (Kind == EMudMachine::Loader && JointMotion > 0.00001)
+    {
+        // Sweep the shell corners too: lowering/curling must not pass through a bed wall.
+        const FTransform Candidate = Tool->GetComponentTransform();
+        bool Blocked = false;
+        for (auto* Receiver : Fleet)
+        {
+            if (Receiver == this || !Receiver->TipBed) continue;
+            for (const double Side : {-145.0, 145.0})
+                for (std::size_t I = 0; I < LoaderRig::BucketProfile.size(); ++I)
+                {
+                    const auto P = LoaderRig::OuterBucketPoint(I);
+                    const FVector Local(P.X, Side, P.Z);
+                    const FVector From = PreviousBucketPose.TransformPosition(Local) / 100;
+                    FVector To = Candidate.TransformPosition(Local) / 100, Velocity = To - From;
+                    Load NoMass;
+                    Blocked |= Receiver->InterceptMaterial(From, To, Velocity, NoMass, false);
+                }
+        }
+        if (Blocked)
+        {
+            Boom = PreviousAngles[0]; Curl = PreviousAngles[2]; ValveA = ValveCurl = 0;
+            bBucketObstructed = true; UpdatePose(Terrain);
+        }
+    }
     const FVector Point = ToolPoint();
     const FVector2D XY = Horizontal(Point);
     const FVector PreviousContact = LastToolContact.Get(PreviousTip);
@@ -1407,7 +1498,7 @@ void AMudMachine::Work(double Dt, double AxisA, double AxisB, AMudTerrain& Terra
     const double Ground = Terrain.Height(XY);
     double Clearance = Kind == EMudMachine::Dozer ? BladeClearance(Terrain, BladeLift + Blade) : Point.Z - Ground;
     const USceneComponent* Bucket = Kind == EMudMachine::Loader ? Tool.Get() : BucketTiltPivot.Get();
-    const double BucketHalfEdge = Kind == EMudMachine::Loader ? 126 : BucketOuterToothCm;
+    const double BucketHalfEdge = Kind == EMudMachine::Loader ? 141 : BucketOuterToothCm;
     if (Bucket)
     {
         const FVector Lip = Kind == EMudMachine::Loader ? LoaderPin(LoaderRig::Lip) : BucketLip;
@@ -1520,12 +1611,21 @@ void AMudMachine::Work(double Dt, double AxisA, double AxisB, AMudTerrain& Terra
         const FVector Lateral = Tool->GetRightVector();
         const FVector2D Across = Horizontal(Lateral).GetSafeNormal();
         const double AcrossSlope = Lateral.Z / FMath::Max(0.5, Horizontal(Lateral).Size());
-        const double Amount = FMath::Min(Dt * FMath::Min(4.2, Speed * 3.0), Capacity() - Cargo.Volume());
-        const Load Cut = Terrain.SweepCut(PreviousContact - FVector(0, 0, 0.035), Point - FVector(0, 0, 0.035),
-            Across, FVector2D(1.26, 0.65), Amount, {AcrossSlope, 0});
-        Cargo.Receive(Cut);
-        SpillVolume = Moved = Cut.Volume();
-        WorkedMaterial = Cut.DominantMaterial();
+        const double Free = FMath::Max(0.0, Capacity() - Cargo.Volume());
+        const double Amount = Dt * FMath::Min(4.2, Speed * 3.0);
+        Load Cut = Terrain.SweepCut(PreviousContact - FVector(0, 0, 0.035), Point - FVector(0, 0, 0.035),
+            Across, FVector2D(1.41, 0.50), Amount, {AcrossSlope, 0});
+        const double Displaced = Cut.Volume();
+        const Material CutMaterial = Cut.DominantMaterial();
+        Cargo.Receive(Cut.Take(Free));
+        if (Cut.Volume() > Epsilon)
+        {
+            const Load Left = Cut.Take(Cut.Volume() * 0.5);
+            Terrain.Deposit(XY - Across * 1.65, 0.55, Left);
+            Terrain.Deposit(XY + Across * 1.65, 0.55, Cut);
+        }
+        SpillVolume = Moved = Displaced;
+        WorkedMaterial = CutMaterial;
     }
     else if (Kind == EMudMachine::Dozer)
     {
@@ -1822,7 +1922,7 @@ void AMudMachine::UpdatePose(const AMudTerrain& Terrain)
     if (Kind == EMudMachine::Loader)
     {
         BoomPivot->SetRelativeRotation(FRotator(Boom, 0, 0));
-        Tool->SetRelativeRotation(FRotator(Curl - Boom, 0, 0));
+        Tool->SetRelativeRotation(FRotator(LoaderRig::BucketPitch(Boom, Curl), 0, 0));
         UpdateLoaderLinkage();
     }
     if (TipBed)
@@ -1872,7 +1972,7 @@ void AMudMachine::UpdatePose(const AMudTerrain& Terrain)
     }
     if (Kind == EMudMachine::Excavator || Kind == EMudMachine::Loader)
     {
-        const FVector Span = Kind == EMudMachine::Loader ? FVector(0.85, 2.15, 0.72) :
+        const FVector Span = Kind == EMudMachine::Loader ? FVector(1.00, 2.65, 0.92) :
             ExcavatorPayloadSize;
         const double Footprint = FMath::Lerp(0.45, 1.0, FMath::Pow(Fraction, 0.45));
         Surface->SetRelativeScale3D(Span * FVector(Footprint, Footprint, FMath::Lerp(0.08, 1.0, FMath::Pow(Fraction, 0.8))));

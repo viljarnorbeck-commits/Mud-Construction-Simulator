@@ -29,6 +29,8 @@
 #include "MudTerrain.h"
 #include "SoilValidation.h"
 #include "MudWorldValidation.h"
+#include "LoaderValidation.h"
+#include "LoaderRig.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
@@ -410,6 +412,7 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
     Excavator->ToggleUnload();
     for (int32 I = 0; I < 225; ++I)
         Excavator->Work(FixedStep, 0, 0, Terrain, Fleet);
+    Terrain.SettlePours();
     const double BedLoad = Dumper->Cargo.Volume();
     const bool bLoadedBed = SecondBucket > 0.25 && FMath::IsNearlyEqual(SecondBucket, BedLoad, 0.002) &&
         Excavator->Cargo.Volume() < Epsilon && FMath::IsNearlyEqual(Before - GroundVolume(), BedLoad, 0.005);
@@ -491,7 +494,7 @@ bool TestMachineWork(AMudTerrain& Terrain, const TArray<AMudMachine*>& Fleet)
     const double TippedEdge = MoveLoader(0, 1);
     const bool bLoaderControls = RaisedEdge > InitialEdge + 0.15 && LoweredEdge < RaisedEdge - 0.15 &&
         CurledEdge > LoweredEdge + 0.15 && TippedEdge < CurledEdge - 0.15;
-    Loader->Boom = -22;
+    Loader->Boom = LoaderRig::MinBoom;
     Loader->Curl = 0;
     Loader->Halt();
     Loader->UpdatePose(Terrain);
@@ -649,6 +652,15 @@ void AMudOperator::BeginPlay()
     {
         bInitializeFailed=true; // The diagnostic actor owns the simulation; no player autosave is armed.
         auto* Validation=GetWorld()->SpawnActor<AMudWorldValidation>();Validation->Initialize(Terrain);
+        return;
+    }
+    if (FParse::Param(FCommandLine::Get(), TEXT("MudLoaderValidation")))
+    {
+        const bool Passed = RunLoaderValidation(*Terrain, Fleet);
+        FString Report;
+        if (FParse::Value(FCommandLine::Get(), TEXT("MudSmokeReport="), Report))
+            FFileHelper::SaveStringToFile(Passed ? TEXT("passed") : TEXT("failed"), *Report);
+        FPlatformMisc::RequestExitWithStatus(false, Passed ? 0 : 1);
         return;
     }
     if (FParse::Param(FCommandLine::Get(), TEXT("MudSoilValidation")))
